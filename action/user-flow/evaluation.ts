@@ -1,12 +1,12 @@
 "use server";
 
 import { db } from "@/db/drizzle";
-import { flow, flowStep, interviewEvaluation, userFlow } from "@/db/schema";
+import { flow, flowStep, interviewEvaluation, interviewSchedule, userFlow } from "@/db/schema";
 import { verifyRole } from "@/lib/dal";
 import { listPeopleUsersByLinkIds } from "@/lib/link/user-lookup";
 import { writeOperationAudit } from "@/lib/operation-audit";
 import { logServerError } from "@/lib/server-error-log";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { syncUserRoleFromAcceptedFlows } from "./roleTransition";
 
@@ -75,6 +75,7 @@ export const createEvaluation = async (
           .update(userFlow)
           .set({ progressStatus: "ongoing", fkCurrentStepId: interviewStepId, updatedAt: new Date() })
           .where(eq(userFlow.id, userFlowId));
+
       });
 
       revalidatePath("/dashboard/recruitment");
@@ -103,7 +104,7 @@ export const createEvaluation = async (
         .set({ progressStatus: "ongoing", fkCurrentStepId: interviewStepId, updatedAt: new Date() })
         .where(eq(userFlow.id, userFlowId));
 
-      return tx
+      const inserted = await tx
         .insert(interviewEvaluation)
         .values({
           fkUserFlowId: userFlowId,
@@ -113,6 +114,8 @@ export const createEvaluation = async (
           status: "submitted",
         })
         .returning();
+
+      return inserted;
     });
 
     revalidatePath("/dashboard/recruitment");
@@ -225,6 +228,7 @@ export const reopenAndEvaluate = async (
         meetingLink: link,
         status: "submitted",
       });
+
     });
 
     revalidatePath("/dashboard/recruitment");
@@ -560,6 +564,34 @@ export const getEvaluationCandidates = async (flowId: number) => {
       )
       .where(eq(userFlow.fkFlowId, flowId));
 
+    const userFlowIds = candidates.map((candidate) => candidate.userFlowId);
+    const scheduleRows = userFlowIds.length === 0
+      ? []
+      : await db
+          .select({
+            id: interviewSchedule.id,
+            fkUserFlowId: interviewSchedule.fkUserFlowId,
+            meetingLink: interviewSchedule.meetingLink,
+            meetingMinuteLink: interviewSchedule.meetingMinuteLink,
+            startsAt: interviewSchedule.startsAt,
+            endsAt: interviewSchedule.endsAt,
+            status: interviewSchedule.status,
+          })
+          .from(interviewSchedule)
+          .where(
+            and(
+              inArray(interviewSchedule.fkUserFlowId, userFlowIds),
+              eq(interviewSchedule.status, "created"),
+            ),
+          )
+          .orderBy(desc(interviewSchedule.startsAt));
+    const latestScheduleMap = new Map<number, typeof scheduleRows[number]>();
+    for (const schedule of scheduleRows) {
+      if (!latestScheduleMap.has(schedule.fkUserFlowId)) {
+        latestScheduleMap.set(schedule.fkUserFlowId, schedule);
+      }
+    }
+
     const userMap = await listPeopleUsersByLinkIds(
       candidates.map((candidate) => candidate.uid),
       { canViewSensitiveInfo: session.role >= 3 },
@@ -570,6 +602,12 @@ export const getEvaluationCandidates = async (flowId: number) => {
       name: userMap.get(candidate.uid)?.name ?? "未知用户",
       studentId: userMap.get(candidate.uid)?.studentId ?? null,
       phoneNumber: session!.role >= 3 ? userMap.get(candidate.uid)?.phone ?? null : null,
+      scheduleId: latestScheduleMap.get(candidate.userFlowId)?.id ?? null,
+      scheduleMeetingLink: latestScheduleMap.get(candidate.userFlowId)?.meetingLink ?? null,
+      scheduleMeetingMinuteLink: latestScheduleMap.get(candidate.userFlowId)?.meetingMinuteLink ?? null,
+      scheduleStartsAt: latestScheduleMap.get(candidate.userFlowId)?.startsAt ?? null,
+      scheduleEndsAt: latestScheduleMap.get(candidate.userFlowId)?.endsAt ?? null,
+      scheduleStatus: latestScheduleMap.get(candidate.userFlowId)?.status ?? null,
     })).sort((a, b) => (a.studentId ?? "").localeCompare(b.studentId ?? ""));
   } catch (error) {
     logServerError("evaluation:getCandidates", error, {

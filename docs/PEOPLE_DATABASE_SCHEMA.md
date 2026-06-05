@@ -4,8 +4,8 @@
 | --- | --- |
 | 文档状态 | Draft |
 | 适用分支 | `v3.1` |
-| 来源 | `db/schema.ts`、`migrations/0011_link_user_ids.sql`、`migrations/0012_operation_audit.sql`、`migrations/0013_fix_database_design.sql`、`migrations/0014_fix_email_fk.sql`、`migrations/0015_rename_evaluation_status.sql` |
-| 最后更新 | 2026-06-04 |
+| 来源 | `db/schema.ts`、`migrations/0011_link_user_ids.sql`、`migrations/0012_operation_audit.sql`、`migrations/0013_fix_database_design.sql`、`migrations/0014_fix_email_fk.sql`、`migrations/0015_rename_evaluation_status.sql`、`migrations/0016_feishu_interview_scheduling.sql`、`migrations/0017_email_template_content.sql`、`migrations/0018_interview_schedule_meeting_minute.sql` |
+| 最后更新 | 2026-06-05 |
 
 ## 1. 边界
 
@@ -25,6 +25,9 @@ People v3.1 数据库只维护招新、流程、评分、面评、邮件和审�
 | `evaluation_status_enum` | `submitted`、`approved`、`rejected` | 面评终审状态（讲师提交面评 → 管理员终审） |
 | `email_batch_status_enum` | `draft`、`queued`、`completed`、`failed` | 邮件批次状态 |
 | `email_delivery_status_enum` | `pending`、`sending`、`sent`、`failed` | 单封邮件发送状态 |
+| `interview_schedule_status_enum` | `created`、`cancelled`、`failed` | 面试日程状态 |
+
+> `progress_status` 来自旧 `user_flow_status_enum`（`pending`/`accepted`/`rejected`/`ongoing`/`passed`/`failed`）的简化，去掉报名审核维度。迁移时 `pending` → `not_started`，`accepted` → `passed`，`rejected` → `failed`，`ongoing`/`passed`/`failed` 保持原语义。
 
 > `progress_status` 来自旧 `user_flow_status_enum`（`pending`/`accepted`/`rejected`/`ongoing`/`passed`/`failed`）的简化，去掉报名审核维度。
 
@@ -40,8 +43,11 @@ People v3.1 数据库只维护招新、流程、评分、面评、邮件和审�
 | `user_point` | 题目评分记录 | `fk_judger_id` 保存 Link 用户 ID |
 | `interview_evaluation` | 面评记录和审批状态 | `fk_user_id` 保存 Link 用户 ID（面评撰写人）；`fk_reviewed_by` 保存 Link 用户 ID（审批人） |
 | `email_template_setting` | 结果邮件模板配置 | 无用户字段 |
+| `email_template_content` | 通用邮件文案模板配置 | 无用户字段 |
 | `email_batch` | 邮件发送批次 | `fk_created_by` 保存 Link 用户 ID |
 | `email_delivery` | 单个用户邮件发送记录 | `fk_user_id` 保存 Link 用户 ID |
+| `user_oauth_account` | People 私有第三方 OAuth token 绑定 | `fk_user_id` 保存 Link 用户 ID |
+| `interview_schedule` | 非笔试流程面试日程和飞书会议记录 | `fk_organizer_id` 保存 Link 用户 ID |
 | `operation_audit` | 管理操作审计 | `actor_id` 保存 Link 用户 ID |
 
 ## 4. 旧用户表
@@ -170,7 +176,7 @@ People v3.1 数据库只维护招新、流程、评分、面评、邮件和审�
 | `fk_user_flow_id` | `integer` | 关联 `user_flow.id`（CASCADE） |
 | `fk_user_id` | `integer` | 面评撰写人 Link 用户 ID |
 | `content` | `text` | 面评内容 |
-| `meeting_link` | `text` | 会议链接 |
+| `meeting_link` | `text` | 面试结束后的妙记链接或复盘记录链接 |
 | `status` | `evaluation_status_enum` | 终审状态，默认 `submitted` |
 | `fk_reviewed_by` | `integer` | 审批人 Link 用户 ID |
 | `created_at` | `timestamp` | 创建时间 |
@@ -178,7 +184,41 @@ People v3.1 数据库只维护招新、流程、评分、面评、邮件和审�
 
 > 删除 `user_flow` 时级联删除面评记录。
 
+
+### `interview_schedule`
+
+非笔试流程面试预约表。飞书日程由讲师个人 OAuth token 发起，`meeting_link` 保存飞书会议链接，不自动写入面评记录。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | `serial` | 日程记录 ID |
+| `fk_user_flow_id` | `integer` | 关联 `user_flow.id`（CASCADE） |
+| `fk_evaluation_id` | `integer` | 关联 `interview_evaluation.id`（SET NULL） |
+| `fk_organizer_id` | `integer` | 日程发起讲师 Link 用户 ID |
+| `provider` | `varchar(32)` | 日程服务商，默认 `feishu` |
+| `provider_event_id` | `varchar(255)` | 飞书 Calendar event ID |
+| `provider_reserve_id` | `varchar(255)` | 飞书 VC reserve ID |
+| `provider_meeting_no` | `varchar(255)` | 飞书会议号 |
+| `meeting_link` | `text` | 会议链接 |
+| `meeting_minute_link` | `text` | 飞书妙记/日程妙记链接，面试结束后可手动生成或由事件回调自动生成 |
+| `summary` | `varchar(255)` | 日程标题 |
+| `description` | `text` | 日程描述 |
+| `attendee_email` | `varchar(254)` | 候选人邮箱 |
+| `starts_at` | `timestamp` | 开始时间 |
+| `ends_at` | `timestamp` | 结束时间 |
+| `timezone` | `varchar(64)` | 时区，默认 `Asia/Shanghai` |
+| `status` | `interview_schedule_status_enum` | 状态，默认 `created` |
+| `created_at` | `timestamp` | 创建时间 |
+| `updated_at` | `timestamp` | 更新时间 |
+
+索引：
+
+- `interview_schedule_user_flow_idx` on `fk_user_flow_id`
+- `interview_schedule_organizer_idx` on `fk_organizer_id`
+- `interview_schedule_provider_event_uidx` unique on `provider, provider_event_id`
+
 ## 8. 邮件表
+
 
 ### `email_template_setting`
 
@@ -196,6 +236,20 @@ People v3.1 数据库只维护招新、流程、评分、面评、邮件和审�
 | `contact_email` | `varchar(254)` | 联系邮箱 |
 | `member_form_label` | `varchar(100)` | 登记表展示名称 |
 | `feishu_group_name` | `varchar(100)` | 飞书群展示名称 |
+| `updated_at` | `timestamp` | 更新时间 |
+
+### `email_template_content`
+
+通用邮件文案模板配置表。当前用于面试预约通知，不承载通过/不通过结果邮件语义。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | `serial` | 模板配置 ID |
+| `template_key` | `varchar(80)` | 模板 key，当前支持 `interview.schedule` |
+| `subject_template` | `varchar(255)` | 邮件标题模板 |
+| `title_template` | `varchar(255)` | 邮件正文主标题模板 |
+| `body_template` | `text` | 邮件正文说明模板 |
+| `footer_text` | `varchar(255)` | 邮件落款 |
 | `updated_at` | `timestamp` | 更新时间 |
 
 ### `email_batch`
@@ -235,7 +289,30 @@ People v3.1 数据库只维护招新、流程、评分、面评、邮件和审�
 | `sent_at` | `timestamp` | 发送时间 |
 | `updated_at` | `timestamp` | 更新时间 |
 
-## 9. 审计表
+## 9. OAuth 与审计表
+
+### `user_oauth_account`
+
+People 私有 OAuth token 绑定表。当前用于保存讲师飞书 `user_access_token` / `refresh_token`，token 入库前由服务端加密。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | `serial` | 绑定记录 ID |
+| `fk_user_id` | `integer` | Link 用户 ID |
+| `provider` | `varchar(32)` | OAuth 服务商，当前为 `feishu` |
+| `provider_user_id` | `varchar(255)` | 服务商用户 ID，飞书为 `open_id` |
+| `provider_union_id` | `varchar(255)` | 飞书 `union_id` |
+| `access_token` | `text` | 加密后的 access token |
+| `refresh_token` | `text` | 加密后的 refresh token |
+| `access_token_expires_at` | `timestamp` | access token 过期时间 |
+| `refresh_token_expires_at` | `timestamp` | refresh token 过期时间 |
+| `created_at` | `timestamp` | 创建时间 |
+| `updated_at` | `timestamp` | 更新时间 |
+
+唯一约束：
+
+- `(fk_user_id, provider)`
+- `(provider, provider_user_id)`
 
 ### `operation_audit`
 
@@ -272,6 +349,7 @@ flow ──RESTRICT──► email_batch ──CASCADE──► email_delivery
                    │
                    ├──CASCADE──► user_point
                    ├──CASCADE──► interview_evaluation
+                   ├──CASCADE──► interview_schedule
                    │
                    └── 业务表 user ID 字段无 DB 级 FK（用户数据在 Link）
 ```
@@ -283,6 +361,7 @@ flow ──RESTRICT──► email_batch ──CASCADE──► email_delivery
 | `email_delivery` → `user_flow` | SET NULL | 删除报名记录时保留审计，解除关联 |
 | 其他业务表 → 父表 | CASCADE | 父记录删除时级联清理子数据 |
 | `user_flow.fk_current_step_id` → `flow_step` | SET NULL | step 被物理删除后不阻断用户流程 |
+| `interview_schedule.fk_evaluation_id` → `interview_evaluation` | SET NULL | 删除或重建面评时保留已创建日程记录 |
 
 ## 11. v3.1 用户 ID 迁移口径
 
@@ -303,6 +382,8 @@ flow ──RESTRICT──► email_batch ──CASCADE──► email_delivery
 - `interview_evaluation.fk_reviewed_by`
 - `email_batch.fk_created_by`
 - `email_delivery.fk_user_id`
+- `user_oauth_account.fk_user_id`
+- `interview_schedule.fk_organizer_id`
 - `operation_audit.actor_id`
 
 ## 12. 维护原则
@@ -311,3 +392,4 @@ flow ──RESTRICT──► email_batch ──CASCADE──► email_delivery
 2. 任何用户基础资料字段优先放到 Link，不扩展旧 `user` 表。
 3. 如果未来确实需要 People 私有用户扩展字段，应新增以 Link 用户 ID 为主键或唯一键的扩展表。
 4. 业务表用户字段必须明确标注保存的是 Link 用户 ID，避免和旧 People 用户 ID 混用。
+5. 第三方 OAuth token 属于 People 私有业务凭据，必须加密保存，不写入 session 或客户端。
