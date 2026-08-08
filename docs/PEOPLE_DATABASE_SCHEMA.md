@@ -4,8 +4,8 @@
 | --- | --- |
 | 文档状态 | Draft |
 | 适用分支 | `v3.1` |
-| 来源 | `db/schema.ts`、`migrations/0011_link_user_ids.sql`、`migrations/0012_operation_audit.sql`、`migrations/0013_fix_database_design.sql`、`migrations/0014_fix_email_fk.sql`、`migrations/0015_rename_evaluation_status.sql`、`migrations/0016_feishu_interview_scheduling.sql`、`migrations/0017_email_template_content.sql`、`migrations/0018_interview_schedule_meeting_minute.sql` |
-| 最后更新 | 2026-06-05 |
+| 来源 | `db/schema.ts`、`migrations/0011_link_user_ids.sql` 至 `migrations/0026_email_center_production_hardening.sql` |
+| 最后更新 | 2026-06-10 |
 
 ## 1. 边界
 
@@ -24,7 +24,7 @@ People v3.1 数据库只维护招新、流程、评分、面评、邮件和审�
 | `progress_status_enum` | `not_started`、`ongoing`、`passed`、`failed` | 流程进行状态（报名即进流程，无需审核） |
 | `evaluation_status_enum` | `submitted`、`approved`、`rejected` | 面评终审状态（讲师提交面评 → 管理员终审） |
 | `email_batch_status_enum` | `draft`、`queued`、`completed`、`failed` | 邮件批次状态 |
-| `email_delivery_status_enum` | `pending`、`sending`、`sent`、`failed` | 单封邮件发送状态 |
+| `email_delivery_status_enum` | `pending`、`sending`、`sent`、`failed`、`dead` | 单封邮件发送状态 |
 | `interview_schedule_status_enum` | `created`、`cancelled`、`failed` | 面试日程状态 |
 
 > `progress_status` 来自旧 `user_flow_status_enum`（`pending`/`accepted`/`rejected`/`ongoing`/`passed`/`failed`）的简化，去掉报名审核维度。迁移时 `pending` → `not_started`，`accepted` → `passed`，`rejected` → `failed`，`ongoing`/`passed`/`failed` 保持原语义。
@@ -45,7 +45,9 @@ People v3.1 数据库只维护招新、流程、评分、面评、邮件和审�
 | `email_template_setting` | 结果邮件模板配置 | 无用户字段 |
 | `email_template_content` | 通用邮件文案模板配置 | 无用户字段 |
 | `email_batch` | 邮件发送批次 | `fk_created_by` 保存 Link 用户 ID |
-| `email_delivery` | 单个用户邮件发送记录 | `fk_user_id` 保存 Link 用户 ID |
+| `email_delivery` | 单封邮件投递记录 | `fk_user_id` 保存 Link 用户 ID，可为空（测试邮件或外部收件人） |
+| `email_delivery_attempt` | 邮件发送尝试和 provider 回执日志 | `triggered_by` 保存 Link 用户 ID，可为空 |
+| `email_send_rate_limit` | 邮件发送全局限速 bucket | 无用户字段 |
 | `user_oauth_account` | People 私有第三方 OAuth token 绑定 | `fk_user_id` 保存 Link 用户 ID |
 | `interview_schedule` | 非笔试流程面试日程和飞书会议记录 | `fk_organizer_id` 保存 Link 用户 ID |
 | `operation_audit` | 管理操作审计 | `actor_id` 保存 Link 用户 ID |
@@ -199,10 +201,12 @@ People v3.1 数据库只维护招新、流程、评分、面评、邮件和审�
 | `provider_event_id` | `varchar(255)` | 飞书 Calendar event ID |
 | `provider_reserve_id` | `varchar(255)` | 飞书 VC reserve ID |
 | `provider_meeting_no` | `varchar(255)` | 飞书会议号 |
-| `meeting_link` | `text` | 会议链接 |
-| `meeting_minute_link` | `text` | 飞书妙记/日程妙记链接，面试结束后可手动生成或由事件回调自动生成 |
+| `meeting_link` | `text` | 飞书会议链接，必须展示给讲师和面试同学 |
+| `schedule_link` | `text` | 飞书日程详情链接，用于区分日程入口和会议入口 |
+| `meeting_minute_link` | `text` | 飞书妙记/日程妙记链接，由飞书事件回调自动同步 |
 | `summary` | `varchar(255)` | 日程标题 |
 | `description` | `text` | 日程描述 |
+| `location` | `varchar(255)` | 线下面试地点或补充地点说明 |
 | `attendee_email` | `varchar(254)` | 候选人邮箱 |
 | `starts_at` | `timestamp` | 开始时间 |
 | `ends_at` | `timestamp` | 结束时间 |
@@ -240,12 +244,12 @@ People v3.1 数据库只维护招新、流程、评分、面评、邮件和审�
 
 ### `email_template_content`
 
-通用邮件文案模板配置表。当前用于面试预约通知，不承载通过/不通过结果邮件语义。
+通用邮件文案模板配置表。当前用于面试预约、改约和取消通知，不承载通过/不通过结果邮件语义。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | `serial` | 模板配置 ID |
-| `template_key` | `varchar(80)` | 模板 key，当前支持 `interview.schedule` |
+| `template_key` | `varchar(80)` | 模板 key，当前支持 `interview.schedule.created`、`interview.schedule.rescheduled`、`interview.schedule.cancelled`；历史 `interview.schedule` 仅作为创建通知 fallback |
 | `subject_template` | `varchar(255)` | 邮件标题模板 |
 | `title_template` | `varchar(255)` | 邮件正文主标题模板 |
 | `body_template` | `text` | 邮件正文说明模板 |
@@ -259,34 +263,88 @@ People v3.1 数据库只维护招新、流程、评分、面评、邮件和审�
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | `serial` | 批次 ID |
+| `idempotency_key` | `varchar(160)` | 批次幂等键；结果通知按流程、通知类型和收件报名集合生成 |
 | `template_key` | `varchar(80)` | 模板 key |
+| `category` | `varchar(32)` | 邮件类型，默认 `result` |
+| `name` | `varchar(255)` | 批次名称 |
 | `subject` | `varchar(255)` | 主题 |
 | `accept` | `boolean` | 是否录取结果 |
 | `status` | `email_batch_status_enum` | 批次状态，默认 `queued` |
 | `total_count` | `integer` | 总发送数 |
-| `fk_flow_id` | `integer` | 关联 `flow.id`（RESTRICT — 有邮件记录的流程不可直接删除） |
+| `fk_flow_id` | `integer` | 关联 `flow.id`（RESTRICT，可为空） |
 | `fk_created_by` | `integer` | 创建者 Link 用户 ID |
+| `metadata` | `jsonb` | 批次上下文，例如结果通知的 `accept` |
 | `created_at` | `timestamp` | 创建时间 |
 | `updated_at` | `timestamp` | 更新时间 |
 
 ### `email_delivery`
 
-单封邮件发送记录表。
+单封邮件投递记录表。结果通知、面试通知和测试邮件都在这里保存主题、正文快照、状态和关联业务对象。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `id` | `serial` | 发送记录 ID |
+| `idempotency_key` | `varchar(160)` | 投递幂等键；结果通知按流程、通知类型和 `user_flow` 生成 |
+| `category` | `varchar(32)` | 邮件类型：`result`、`interview`、`test` |
+| `template_key` | `varchar(80)` | 模板 key；测试邮件会使用原模板 key 加 `.test` 标记 |
 | `to_address` | `varchar(254)` | 收件地址 |
 | `subject` | `varchar(255)` | 主题 |
 | `html_snapshot` | `text` | 邮件 HTML 快照 |
 | `status` | `email_delivery_status_enum` | 发送状态，默认 `pending` |
 | `error_message` | `text` | 错误信息 |
 | `provider_message_id` | `varchar(255)` | 邮件服务商消息 ID |
-| `fk_email_batch_id` | `integer` | 关联 `email_batch.id`（CASCADE） |
+| `attempt_count` | `integer` | 发送尝试次数 |
+| `last_attempt_at` | `timestamp` | 最近一次尝试时间 |
+| `next_retry_at` | `timestamp` | 自动重试时间；仅 `failed` 状态使用 |
+| `dead_lettered_at` | `timestamp` | 进入死信状态的时间 |
+| `fk_email_batch_id` | `integer` | 关联 `email_batch.id`（CASCADE，可为空） |
+| `fk_flow_id` | `integer` | 关联 `flow.id`（RESTRICT，可为空） |
 | `fk_user_flow_id` | `integer` | 关联 `user_flow.id`（SET NULL — 删除报名记录时保留邮件审计） |
-| `fk_user_id` | `integer` | 收件人 Link 用户 ID |
+| `fk_user_id` | `integer` | 收件人 Link 用户 ID，可为空 |
+| `related_schedule_id` | `integer` | 关联面试预约 ID，可为空 |
+| `created_by` | `integer` | 创建该投递记录的 Link 用户 ID，可为空 |
+| `metadata` | `jsonb` | 投递上下文，例如测试邮件原模板 key、流程 ID、通知类型 |
 | `created_at` | `timestamp` | 创建时间 |
 | `sent_at` | `timestamp` | 发送时间 |
+| `updated_at` | `timestamp` | 更新时间 |
+
+索引：
+
+- `email_delivery_created_at_idx` on `created_at`
+- `email_delivery_filter_idx` on `category, template_key, status`
+- `email_delivery_fk_flow_id_idx` on `fk_flow_id`
+- `email_delivery_attempt_status_idx` on `status, last_attempt_at`
+- `email_delivery_retry_due_idx` on `status, next_retry_at`
+- `email_delivery_provider_message_id_idx` on `provider_message_id`
+- `email_delivery_idempotency_key_uidx` on `idempotency_key`
+
+### `email_delivery_attempt`
+
+单封邮件发送尝试和 provider 回执事件日志。维护任务会按 `EMAIL_ATTEMPT_RETENTION_DAYS` 清理旧记录。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | `serial` | 尝试记录 ID |
+| `fk_email_delivery_id` | `integer` | 关联 `email_delivery.id`（CASCADE） |
+| `trigger` | `varchar(32)` | 来源：队列、手动重试、自动重试、provider event 等 |
+| `provider` | `varchar(32)` | 邮件服务商 |
+| `status` | `varchar(32)` | 尝试或回执状态 |
+| `provider_message_id` | `varchar(255)` | 服务商消息 ID |
+| `error_message` | `text` | 错误信息 |
+| `triggered_by` | `integer` | 触发人 Link 用户 ID，可为空 |
+| `started_at` | `timestamp` | 开始时间 |
+| `finished_at` | `timestamp` | 结束时间 |
+| `duration_ms` | `integer` | 耗时 |
+
+### `email_send_rate_limit`
+
+邮件发送全局限速 bucket。`sendEmailDelivery` 调用 SMTP 前按分钟领取 bucket，多个应用实例共享同一张表。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `bucket_key` | `varchar(80)` | 主键，例如 `smtp:2026-06-10T12:34:00.000Z` |
+| `window_start` | `timestamp` | 分钟窗口开始时间 |
+| `count` | `integer` | 当前窗口已领取发送数 |
 | `updated_at` | `timestamp` | 更新时间 |
 
 ## 9. OAuth 与审计表
@@ -340,9 +398,10 @@ People 私有 OAuth token 绑定表。当前用于保存讲师飞书 `user_acces
 
 ```
 flow ──RESTRICT──► email_batch ──CASCADE──► email_delivery
-  │                                               │
-  ├──CASCADE──► flow_step ──CASCADE──► problem     │
-  │                │                               │
+  │                     │                         │
+  │                     └──RESTRICT───────────────┤
+  ├──CASCADE──► flow_step ──CASCADE──► problem    │
+  │                │                              │
   │                └──SET NULL──► user_flow.fk_current_step_id
   │                                               │
   └──CASCADE──► user_flow ◄──SET NULL─────────────┘
@@ -358,6 +417,7 @@ flow ──RESTRICT──► email_batch ──CASCADE──► email_delivery
 |------|------|------|
 | `flow` → `email_batch` | RESTRICT | 防止误删有邮件记录的流程 |
 | `email_batch` → `email_delivery` | CASCADE | 删除批次时级联清理所有发送记录 |
+| `flow` → `email_delivery` | RESTRICT | 单封面试/测试邮件可直接关联流程，保留审计 |
 | `email_delivery` → `user_flow` | SET NULL | 删除报名记录时保留审计，解除关联 |
 | 其他业务表 → 父表 | CASCADE | 父记录删除时级联清理子数据 |
 | `user_flow.fk_current_step_id` → `flow_step` | SET NULL | step 被物理删除后不阻断用户流程 |

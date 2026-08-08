@@ -1,106 +1,69 @@
 "use server";
-import { db } from "@/db/drizzle";
-import { emailBatch, emailDelivery, flow, userFlow } from "@/db/schema";
 import { verifyRole } from "@/lib/dal";
-import { getEducationEmail } from "@/lib/email/address";
-import { listPeopleUsersByLinkIds } from "@/lib/link/user-lookup";
 import {
-  getResultEmailTemplateKey,
-  renderResultEmailSubject,
-  renderResultEmail,
-} from "@/lib/email/result-email";
-import { getEmailTemplateSetting } from "@/action/email/template";
+  requireBooleanInput,
+  requirePositiveIntegerArrayInput,
+  requirePositiveIntegerInput,
+} from "@/lib/email-center/action-input";
+import { createResultEmailBatch } from "@/lib/email-center/batch";
+import { writeOperationAudit } from "@/lib/operation-audit";
 import { logServerError } from "@/lib/server-error-log";
-import { and, eq, inArray } from "drizzle-orm";
 
 export const batchSendEmail = async (
-  uid: number[],
-  flowId: number,
-  accept: boolean
+  uidInput: unknown,
+  flowIdInput: unknown,
+  acceptInput: unknown,
 ) => {
   let session: Awaited<ReturnType<typeof verifyRole>> | null = null;
+  let flowId: number | null = null;
+  let accept: boolean | null = null;
+  let targetUserIds: number[] = [];
 
   try {
-    session = await verifyRole(3)
-    const sourceStatus = accept ? "passed" : "failed";
+    session = await verifyRole(3);
+    targetUserIds = requirePositiveIntegerArrayInput(uidInput, "收件人用户 ID");
+    flowId = requirePositiveIntegerInput(flowIdInput, "流程 ID");
+    accept = requireBooleanInput(acceptInput, "结果通知类型");
+    const actorId = session.uid;
+    const result = await createResultEmailBatch({
+      userIds: targetUserIds,
+      flowId,
+      accept,
+      createdBy: actorId,
+    });
 
-    const targets = (
-      await db
-        .select({
-          userFlowId: userFlow.id,
-          userId: userFlow.fkUserId,
-          flowName: flow.title,
-        })
-        .from(userFlow)
-        .innerJoin(flow, eq(flow.id, userFlow.fkFlowId))
-        .where(
-          and(
-            eq(userFlow.fkFlowId, flowId),
-            inArray(userFlow.fkUserId, uid),
-            eq(userFlow.progressStatus, sourceStatus),
-          )
-        )
-    );
-
-    if (targets.length === 0) {
-      return { batchId: null, deliveryCount: 0 };
+    if (result.batchId) {
+      await writeOperationAudit({
+        actorId,
+        action: "email.batch.create",
+        resourceType: "email_batch",
+        resourceId: result.batchId,
+        metadata: {
+          flowId,
+          accept,
+          targetUserCount: targetUserIds.length,
+          deliveryCount: result.deliveryCount,
+        },
+      });
     }
 
-    const userMap = await listPeopleUsersByLinkIds(targets.map((item) => item.userId));
-
-    const templateKey = getResultEmailTemplateKey(accept);
-    const templateSetting = await getEmailTemplateSetting(templateKey);
-    const subject = renderResultEmailSubject(targets[0].flowName, templateSetting);
-    const [batch] = await db
-      .insert(emailBatch)
-      .values({
-        templateKey,
-        subject,
-        accept,
-        status: "draft",
-        totalCount: targets.length,
-        fkFlowId: flowId,
-        fkCreatedBy: session.uid,
-      })
-      .returning({ id: emailBatch.id });
-
-    const deliveries = await Promise.all(
-      targets.map(async (item) => {
-        const targetUser = userMap.get(item.userId);
-        const toAddress = getEducationEmail(targetUser?.studentId);
-        const htmlSnapshot = await renderResultEmail({
-          name: targetUser?.name ?? "同学",
-          flowName: item.flowName,
-          accept,
-          setting: templateSetting,
-        });
-
-        const [delivery] = await db
-          .insert(emailDelivery)
-          .values({
-            toAddress,
-            subject,
-            htmlSnapshot,
-            fkEmailBatchId: batch.id,
-            fkUserFlowId: item.userFlowId,
-            fkUserId: item.userId,
-          })
-          .returning({ id: emailDelivery.id });
-
-        return delivery;
-      }),
-    );
-
-    return { batchId: batch.id, deliveryCount: deliveries.length };
+    return result;
   } catch (error) {
+    let action = "send-result-email";
+    if (accept === true) {
+      action = "send-acceptance-email";
+    } else if (accept === false) {
+      action = "send-rejection-email";
+    }
+
     logServerError("email:batchSend", error, {
       path: "/dashboard/review",
       userId: session?.uid ?? null,
       role: session?.role ?? null,
-      action: accept ? "send-acceptance-email" : "send-rejection-email",
+      action,
       flowId,
       metadata: {
-        targetUserIds: uid,
+        targetUserIds,
         accept,
       },
     });

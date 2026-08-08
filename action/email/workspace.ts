@@ -6,12 +6,13 @@ import { getEmailTemplateSetting } from "@/action/email/template";
 import { db } from "@/db/drizzle";
 import { emailBatch, emailDelivery, flow, userFlow } from "@/db/schema";
 import { verifyRole } from "@/lib/dal";
-import { listPeopleUsersByLinkIds } from "@/lib/link/user-lookup";
 import {
-  getResultEmailTemplateKey,
-  renderResultEmail,
-  renderResultEmailSubject,
-} from "@/lib/email/result-email";
+  requireBooleanInput,
+  requirePositiveIntegerInput,
+} from "@/lib/email-center/action-input";
+import { listPeopleUsersByLinkIds } from "@/lib/link/user-lookup";
+import { getResultEmailTemplateKey } from "@/lib/email/result-email";
+import { renderEmailTemplate } from "@/lib/email-center/render";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 
@@ -61,26 +62,50 @@ export async function listEmailFlowTargets() {
     const flowTargets = hydratedTargets.filter((target) => target.flowId === item.id);
     const passed = flowTargets.filter((t) => t.status === "passed");
     const failed = flowTargets.filter((t) => t.status === "failed");
+    const acceptedPreview = passed[0]
+      ? await renderEmailTemplate({
+          templateKey: getResultEmailTemplateKey(true),
+          variables: {
+            name: passed[0].name,
+            flowName: item.title,
+            setting: acceptedSetting,
+            genericGreeting: true,
+          },
+        })
+      : null;
+    const rejectedPreview = failed[0]
+      ? await renderEmailTemplate({
+          templateKey: getResultEmailTemplateKey(false),
+          variables: {
+            name: failed[0].name,
+            flowName: item.title,
+            setting: rejectedSetting,
+            genericGreeting: true,
+          },
+        })
+      : null;
+
     return {
       ...item,
       passed,
       failed,
       accepted: passed,
       rejected: failed,
-      acceptedSubject: renderResultEmailSubject(item.title, acceptedSetting),
-      rejectedSubject: renderResultEmailSubject(item.title, rejectedSetting),
-      acceptedPreviewHtml: passed[0]
-        ? await renderResultEmail({ name: passed[0].name, flowName: item.title, accept: true, setting: acceptedSetting, genericGreeting: true })
-        : null,
-      rejectedPreviewHtml: failed[0]
-        ? await renderResultEmail({ name: failed[0].name, flowName: item.title, accept: false, setting: rejectedSetting, genericGreeting: true })
-        : null,
+      acceptedSubject: acceptedPreview?.subject ?? `${item.title} 结果通知`,
+      rejectedSubject: rejectedPreview?.subject ?? `${item.title} 结果通知`,
+      acceptedPreviewHtml: acceptedPreview?.html ?? null,
+      rejectedPreviewHtml: rejectedPreview?.html ?? null,
     };
   }));
 }
 
-export async function createResultEmailBatchFromFlow(flowId: number, accept: boolean) {
+export async function createResultEmailBatchFromFlow(
+  flowIdInput: unknown,
+  acceptInput: unknown,
+) {
   await verifyRole(3);
+  const flowId = requirePositiveIntegerInput(flowIdInput, "流程 ID");
+  const accept = requireBooleanInput(acceptInput, "结果通知类型");
   const sourceStatus = accept ? "passed" : "failed";
   const rows = await db
     .select({ userFlowId: userFlow.id, userId: userFlow.fkUserId })
@@ -96,7 +121,12 @@ export async function createResultEmailBatchFromFlow(flowId: number, accept: boo
     .where(and(eq(emailBatch.fkFlowId, flowId), eq(emailBatch.accept, accept), inArray(emailDelivery.fkUserFlowId, rows.map((item) => item.userFlowId))))
     .orderBy(asc(emailDelivery.createdAt));
 
-  const reusableDelivery = existingDeliveries.find((item) => item.status === "pending" || item.status === "failed");
+  const reusableDelivery = existingDeliveries.find(
+    (item) =>
+      item.status === "pending" ||
+      item.status === "failed" ||
+      item.status === "dead",
+  );
   if (reusableDelivery) return { batchId: reusableDelivery.batchId, deliveryCount: 0 };
 
   const existingUserFlowIds = new Set(existingDeliveries.map((item) => item.userFlowId));
@@ -108,8 +138,13 @@ export async function createResultEmailBatchFromFlow(flowId: number, accept: boo
   return result;
 }
 
-export async function sendResultEmailFromFlow(flowId: number, accept: boolean) {
+export async function sendResultEmailFromFlow(
+  flowIdInput: unknown,
+  acceptInput: unknown,
+) {
   await verifyRole(3);
+  const flowId = requirePositiveIntegerInput(flowIdInput, "流程 ID");
+  const accept = requireBooleanInput(acceptInput, "结果通知类型");
   const batch = await createResultEmailBatchFromFlow(flowId, accept);
   if (!batch.batchId) return { batchId: null, queuedCount: 0 };
   const sent = await sendEmailBatch(batch.batchId);

@@ -15,10 +15,15 @@ import {
   SidebarMenu,
   SidebarMenuItem,
   SidebarMenuButton,
-  SidebarSeparator,
   useSidebar,
 } from '@/components/ui/sidebar';
-import { menuItems, isItemActive, getMenuItemTitle } from '@/components/route';
+import {
+  getMenuGroups,
+  getMenuItemTitle,
+  isItemActive,
+  type MenuItem,
+} from '@/components/route';
+import { FeishuOAuthStatus } from '@/components/feishu-oauth-status';
 
 interface AppSidebarProps {
   role: number;
@@ -32,12 +37,8 @@ function SidebarNav({ role }: { role: number }) {
   const pendingHref = useRef<string | null>(null);
   const pendingTimer = useRef<number | null>(null);
 
-  const authRoutes = useMemo(() => {
-    if (role === 0) return [menuItems[0], menuItems[1]];
-    if (role === 1) return [menuItems[0], menuItems[1]];
-    if (role === 2) return [menuItems[0], menuItems[1], menuItems[2], menuItems[3], menuItems[4]];
-    return menuItems;
-  }, [role]);
+  const groups = useMemo(() => getMenuGroups(role), [role]);
+  const singleGroup = groups.length === 1;
 
   useEffect(() => {
     if (prevPathname.current !== pathname) {
@@ -79,36 +80,45 @@ function SidebarNav({ role }: { role: number }) {
     }, 800);
   };
 
+  const renderItem = (item: MenuItem) => {
+    const active = isItemActive(pathname, item.path);
+    const title = getMenuItemTitle(item, role);
+    const href = item.externalHref ?? `/dashboard${item.path}`;
+    return (
+      <SidebarMenuItem key={item.path || 'profile'}>
+        <SidebarMenuButton asChild isActive={active} tooltip={title}>
+          {item.externalHref ? (
+            <a href={href} target="_blank" rel="noreferrer" title={title}>
+              <item.icon />
+              <span>{title}</span>
+            </a>
+          ) : (
+            <Link
+              href={href}
+              aria-current={active ? 'page' : undefined}
+              title={title}
+              onClick={(event) => handleNavClick(event, href, active)}
+            >
+              <item.icon />
+              <span>{title}</span>
+            </Link>
+          )}
+        </SidebarMenuButton>
+      </SidebarMenuItem>
+    );
+  };
+
   return (
-    <SidebarMenu>
-      {authRoutes.map((item) => {
-        const active = isItemActive(pathname, item.path);
-        const title = getMenuItemTitle(item, role);
-        const href = item.externalHref ?? `/dashboard${item.path}`;
-        return (
-          <SidebarMenuItem key={item.title}>
-            <SidebarMenuButton asChild isActive={active}>
-              {item.externalHref ? (
-                <a href={href} target="_blank" rel="noreferrer" title={title}>
-                  <item.icon />
-                  <span>{title}</span>
-                </a>
-              ) : (
-                <Link
-                  href={href}
-                  aria-current={active ? 'page' : undefined}
-                  title={title}
-                  onClick={(event) => handleNavClick(event, href, active)}
-                >
-                  <item.icon />
-                  <span>{title}</span>
-                </Link>
-              )}
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        );
-      })}
-    </SidebarMenu>
+    <>
+      {groups.map((group) => (
+        <SidebarGroup key={group.id}>
+          <SidebarGroupLabel>{singleGroup ? '导航' : group.label}</SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>{group.items.map(renderItem)}</SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+      ))}
+    </>
   );
 }
 
@@ -118,44 +128,41 @@ export function AppSidebar({ role, userCard }: AppSidebarProps) {
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton size="lg" asChild>
-              <Link href="/">
-                <div className="flex items-center justify-center">
-                  <Image
-                    src="/images/logo.png"
-                    alt="SAST"
-                    width={48}
-                    height={24}
-                    className="h-6 w-auto dark:hidden"
-                  />
-                  <Image
-                    src="/images/white-logo.png"
-                    alt="SAST"
-                    width={48}
-                    height={24}
-                    className="hidden h-6 w-auto dark:block"
-                  />
-                </div>
-                <div className="flex flex-col gap-0.5 leading-none">
-                  <span className="font-semibold">SAST People</span>
-                  <span className="text-xs text-muted-foreground">招新与留任管理</span>
-                </div>
+            <SidebarMenuButton
+              size="lg"
+              asChild
+              tooltip="回到工作台"
+              className="h-16 gap-2.5 px-2.5 data-[size=lg]:h-16"
+            >
+              <Link href="/dashboard" aria-label="回到工作台 · 我的资料">
+                <Image
+                  src="/images/crocodile-transparent.png"
+                  alt=""
+                  width={48}
+                  height={48}
+                  priority
+                  className="size-12 shrink-0 object-contain"
+                />
+                <span className="flex min-w-0 flex-col leading-tight">
+                  <span className="truncate text-[15px] font-semibold tracking-tight">
+                    SAST People
+                  </span>
+                  <span className="truncate text-[11px] text-muted-foreground">
+                    成员与组织平台
+                  </span>
+                </span>
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarHeader>
-      <SidebarSeparator />
       <SidebarContent>
-        <SidebarGroup>
-          <SidebarGroupLabel>导航</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarNav role={role} />
-          </SidebarGroupContent>
-        </SidebarGroup>
+        <SidebarNav role={role} />
       </SidebarContent>
-      <SidebarSeparator />
-      <SidebarFooter>{userCard}</SidebarFooter>
+      <SidebarFooter className="border-t border-sidebar-border/60 p-3">
+        <FeishuOAuthStatus role={role} compact />
+        {userCard}
+      </SidebarFooter>
     </Sidebar>
   );
 }

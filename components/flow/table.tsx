@@ -83,8 +83,8 @@ export const FlowTableColumns: ColumnDef<displayFlow>[] = [
   {
     accessorKey: 'operations',
     header: () => (
-      <div className="grid w-full grid-cols-[4.5rem_4.5rem_4.5rem_3.5rem] items-center justify-end gap-1">
-        <span className="col-span-4 text-center">操作</span>
+      <div className="inline-grid w-full grid-cols-4 items-center justify-items-end gap-x-1">
+        <span className="col-span-4 text-right">操作</span>
       </div>
     ),
     cell({ row }) {
@@ -112,16 +112,16 @@ export function FlowTable<TData extends displayFlow, TValue>({
   });
 
   return (
-    <div className="overflow-hidden rounded-xl border bg-card">
+    <div className="overflow-hidden rounded-lg border bg-card">
       {/* PC 端表格视图 */}
       <div className="hidden xl:block">
         <Table className="table-fixed" containerClassName="overflow-x-visible">
           <colgroup>
+            <col className="w-[30%]" />
+            <col className="w-[10%]" />
+            <col className="w-[14%]" />
+            <col className="w-[14%]" />
             <col className="w-[32%]" />
-            <col className="w-[11%]" />
-            <col className="w-[15%]" />
-            <col className="w-[15%]" />
-            <col className="w-[27%]" />
           </colgroup>
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
@@ -207,7 +207,7 @@ export function FlowTable<TData extends displayFlow, TValue>({
                   <span className="text-foreground text-xs font-mono">{originalDayjs(row.original.endedAt).format('YYYY-MM-DD HH:mm')}</span>
                 </div>
               </div>
-              <div className="pt-3 flex justify-end gap-3 border-t">
+              <div className="flex flex-wrap justify-end gap-2 border-t pt-3">
                 <Operations data={row.original} />
               </div>
             </div>
@@ -219,3 +219,5 @@ export function FlowTable<TData extends displayFlow, TValue>({
     </div>
   );
 }
+
+

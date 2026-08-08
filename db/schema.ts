@@ -42,6 +42,11 @@ export const evaluationStatusEnum = pgEnum("evaluation_status_enum", [
   "rejected",
 ]);
 
+export const evaluationRecommendationEnum = pgEnum(
+  "evaluation_recommendation_enum",
+  ["passed", "failed"],
+);
+
 export const emailBatchStatusEnum = pgEnum("email_batch_status_enum", [
   "draft",
   "queued",
@@ -54,6 +59,7 @@ export const emailDeliveryStatusEnum = pgEnum("email_delivery_status_enum", [
   "sending",
   "sent",
   "failed",
+  "dead",
 ]);
 
 export const interviewScheduleStatusEnum = pgEnum("interview_schedule_status_enum", [
@@ -159,43 +165,122 @@ export const problem = pgTable("problem", {
 
 export const emailBatch = pgTable("email_batch", {
   id: serial("id").primaryKey(),
+  idempotencyKey: varchar("idempotency_key", { length: 160 }),
   templateKey: varchar("template_key", { length: 80 }).notNull(),
+  category: varchar("category", { length: 32 }).notNull().default("result"),
+  name: varchar("name", { length: 255 }),
   subject: varchar("subject", { length: 255 }).notNull(),
-  accept: boolean("accept").notNull(),
+  accept: boolean("accept"),
   status: emailBatchStatusEnum("status").notNull().default("queued"),
   totalCount: integer("total_count").notNull().default(0),
   fkFlowId: integer("fk_flow_id")
-    .references(() => flow.id, { onDelete: "restrict" })
-    .notNull(),
+    .references(() => flow.id, { onDelete: "restrict" }),
   fkCreatedBy: integer("fk_created_by"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at")
     .notNull()
     .defaultNow()
     .$onUpdate(() => sql`now()`),
-});
+}, (table) => ({
+  idempotencyKeyIdx: uniqueIndex("email_batch_idempotency_key_uidx").on(
+    table.idempotencyKey,
+  ),
+}));
 
 export const emailDelivery = pgTable("email_delivery", {
   id: serial("id").primaryKey(),
+  idempotencyKey: varchar("idempotency_key", { length: 160 }),
+  category: varchar("category", { length: 32 }).notNull().default("result"),
+  templateKey: varchar("template_key", { length: 80 }).notNull().default("legacy"),
   toAddress: varchar("to_address", { length: 254 }).notNull(),
   subject: varchar("subject", { length: 255 }).notNull(),
   htmlSnapshot: text("html_snapshot").notNull(),
   status: emailDeliveryStatusEnum("status").notNull().default("pending"),
   errorMessage: text("error_message"),
   providerMessageId: varchar("provider_message_id", { length: 255 }),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  nextRetryAt: timestamp("next_retry_at"),
+  deadLetteredAt: timestamp("dead_lettered_at"),
   fkEmailBatchId: integer("fk_email_batch_id")
-    .references(() => emailBatch.id, { onDelete: "cascade" })
-    .notNull(),
+    .references(() => emailBatch.id, { onDelete: "cascade" }),
+  fkFlowId: integer("fk_flow_id")
+    .references(() => flow.id, { onDelete: "restrict" }),
   fkUserFlowId: integer("fk_user_flow_id")
     .references(() => userFlow.id, { onDelete: "set null" }),
-  fkUserId: integer("fk_user_id").notNull(),
+  fkUserId: integer("fk_user_id"),
+  relatedScheduleId: integer("related_schedule_id"),
+  createdBy: integer("created_by"),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   sentAt: timestamp("sent_at"),
   updatedAt: timestamp("updated_at")
     .notNull()
     .defaultNow()
     .$onUpdate(() => sql`now()`),
-});
+}, (table) => ({
+  idempotencyKeyIdx: uniqueIndex("email_delivery_idempotency_key_uidx").on(
+    table.idempotencyKey,
+  ),
+  createdAtIdx: index("email_delivery_created_at_idx").on(table.createdAt),
+  filterIdx: index("email_delivery_filter_idx").on(
+    table.category,
+    table.templateKey,
+    table.status,
+  ),
+  flowIdIdx: index("email_delivery_fk_flow_id_idx").on(table.fkFlowId),
+  attemptStatusIdx: index("email_delivery_attempt_status_idx").on(
+    table.status,
+    table.lastAttemptAt,
+  ),
+  retryDueIdx: index("email_delivery_retry_due_idx").on(
+    table.status,
+    table.nextRetryAt,
+  ),
+  providerMessageIdx: index("email_delivery_provider_message_id_idx").on(
+    table.providerMessageId,
+  ),
+}));
+
+export const emailDeliveryAttempt = pgTable("email_delivery_attempt", {
+  id: serial("id").primaryKey(),
+  fkEmailDeliveryId: integer("fk_email_delivery_id")
+    .references(() => emailDelivery.id, { onDelete: "cascade" })
+    .notNull(),
+  trigger: varchar("trigger", { length: 32 }).notNull().default("unknown"),
+  provider: varchar("provider", { length: 32 }).notNull().default("smtp"),
+  status: varchar("status", { length: 32 }).notNull(),
+  providerMessageId: varchar("provider_message_id", { length: 255 }),
+  errorMessage: text("error_message"),
+  triggeredBy: integer("triggered_by"),
+  startedAt: timestamp("started_at").notNull().defaultNow(),
+  finishedAt: timestamp("finished_at"),
+  durationMs: integer("duration_ms"),
+}, (table) => ({
+  deliveryStartedAtIdx: index("email_delivery_attempt_delivery_started_at_idx").on(
+    table.fkEmailDeliveryId,
+    table.startedAt,
+  ),
+  statusStartedAtIdx: index("email_delivery_attempt_status_started_at_idx").on(
+    table.status,
+    table.startedAt,
+  ),
+}));
+
+export const emailSendRateLimit = pgTable("email_send_rate_limit", {
+  bucketKey: varchar("bucket_key", { length: 80 }).primaryKey(),
+  windowStart: timestamp("window_start").notNull(),
+  count: integer("count").notNull().default(0),
+  updatedAt: timestamp("updated_at")
+    .notNull()
+    .defaultNow()
+    .$onUpdate(() => sql`now()`),
+}, (table) => ({
+  windowStartIdx: index("email_send_rate_limit_window_start_idx").on(
+    table.windowStart,
+  ),
+}));
 
 export const emailTemplateSetting = pgTable("email_template_setting", {
   id: serial("id").primaryKey(),
@@ -250,6 +335,8 @@ export const interviewEvaluation = pgTable("interview_evaluation", {
     .notNull(),
   content: text("content").notNull(),
   meetingLink: text("meeting_link"),
+  /* 讲师建议，不等同于管理员最终决定。历史记录允许为空。 */
+  recommendation: evaluationRecommendationEnum("recommendation"),
   status: evaluationStatusEnum("status").notNull().default("submitted"),
   /* Link 用户 ID — 审批人 */
   fkReviewedBy: integer("fk_reviewed_by"),
@@ -296,15 +383,20 @@ export const interviewSchedule = pgTable("interview_schedule", {
   providerEventId: varchar("provider_event_id", { length: 255 }),
   providerReserveId: varchar("provider_reserve_id", { length: 255 }),
   providerMeetingNo: varchar("provider_meeting_no", { length: 255 }),
+  providerMeetingId: varchar("provider_meeting_id", { length: 255 }),
   meetingLink: text("meeting_link").notNull(),
+  scheduleLink: text("schedule_link"),
   meetingMinuteLink: text("meeting_minute_link"),
   summary: varchar("summary", { length: 255 }).notNull(),
   description: text("description"),
+  location: varchar("location", { length: 255 }),
   attendeeEmail: varchar("attendee_email", { length: 254 }),
   startsAt: timestamp("starts_at").notNull(),
   endsAt: timestamp("ends_at").notNull(),
   timezone: varchar("timezone", { length: 64 }).notNull().default("Asia/Shanghai"),
   status: interviewScheduleStatusEnum("status").notNull().default("created"),
+  meetingStatus: varchar("meeting_status", { length: 32 }).notNull().default("scheduled"),
+  meetingEndedAt: timestamp("meeting_ended_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at")
     .notNull()
@@ -313,6 +405,9 @@ export const interviewSchedule = pgTable("interview_schedule", {
 }, (table) => ({
   userFlowIdx: index("interview_schedule_user_flow_idx").on(table.fkUserFlowId),
   organizerIdx: index("interview_schedule_organizer_idx").on(table.fkOrganizerId),
+  activeUserFlowUnique: uniqueIndex("interview_schedule_active_user_flow_uidx")
+    .on(table.fkUserFlowId)
+    .where(sql`${table.status} = 'created'`),
   providerEventUnique: uniqueIndex("interview_schedule_provider_event_uidx")
     .on(table.provider, table.providerEventId),
 }));

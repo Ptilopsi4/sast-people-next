@@ -24,7 +24,7 @@ const Delete = ({ data }: { data: displayFlow }) => {
         <Button
           size="sm"
           variant="ghost"
-          className="h-8 rounded-lg px-2.5 text-destructive shadow-none hover:bg-destructive/10 hover:text-destructive"
+          className="h-10 shrink-0 rounded-lg px-3 text-sm shadow-none text-destructive hover:bg-destructive/10 hover:text-destructive xl:h-8 xl:px-2"
         >
           删除
         </Button>
@@ -60,3 +60,5 @@ const Delete = ({ data }: { data: displayFlow }) => {
 };
 
 export { Delete };
+
+

@@ -218,8 +218,8 @@ export const MarkProblemTable = ({
 
   return (
     <div className="flex flex-col gap-4">
-      <Card key={userFlowId}>
-        <CardHeader>
+      <section key={userFlowId} className="border-y bg-muted/10">
+        <header className="px-4 py-5 lg:px-6">
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
               <div className="flex flex-col gap-2">
@@ -241,8 +241,8 @@ export const MarkProblemTable = ({
               为每道题填写分数后，点击底部“确认评分并返回扫码页”。本页不再逐题单独确认。
             </p>
           </div>
-        </CardHeader>
-        <CardContent>
+        </header>
+        <div className="border-t px-4 py-5 lg:px-6">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {problemPoints.map((problemPoint, index) => {
               const problem = problems[index];
@@ -253,7 +253,7 @@ export const MarkProblemTable = ({
               return (
                 <div
                   key={problem.id}
-                  className="flex h-full flex-col gap-4 rounded-xl border bg-muted/10 p-4"
+                  className="flex h-full flex-col gap-4 rounded-md border bg-background p-4"
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex flex-col gap-1">
@@ -288,26 +288,32 @@ export const MarkProblemTable = ({
               );
             })}
           </div>
-        </CardContent>
-      </Card>
-      <div className="sticky bottom-4 flex flex-col gap-3 rounded-2xl border bg-background/95 p-4 shadow-lg backdrop-blur md:flex-row md:items-center md:justify-between">
+        </div>
+      </section>
+      <div className="sticky bottom-[max(1rem,env(safe-area-inset-bottom))] z-20 flex flex-col gap-3 rounded-lg border bg-background/95 p-4 shadow-lg backdrop-blur md:flex-row md:items-center md:justify-between">
         <div className="flex flex-col gap-1">
           <p className="text-sm font-medium">完成当前考生阅卷</p>
           <p className="text-xs text-muted-foreground">
             提交后会保存所有题目分数，并自动返回扫码页继续下一位。
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
           <Button
             type="button"
             variant="outline"
+            className="h-11 w-full sm:h-9 sm:w-auto"
             onClick={handleBackToReview}
             disabled={isSubmitting}
           >
             <ArrowLeft data-icon="inline-start" />
             返回扫码页
           </Button>
-          <Button type="button" onClick={() => void handleSubmit()} loading={isSubmitting}>
+          <Button
+            type="button"
+            className="h-11 w-full sm:h-9 sm:w-auto"
+            onClick={() => void handleSubmit()}
+            loading={isSubmitting}
+          >
             <CheckCircle2 data-icon="inline-start" />
             确认评分并返回扫码页
           </Button>
@@ -316,3 +322,4 @@ export const MarkProblemTable = ({
     </div>
   );
 };
+

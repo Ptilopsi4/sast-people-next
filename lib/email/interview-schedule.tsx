@@ -3,17 +3,19 @@ import "server-only";
 import { render } from "@react-email/render";
 import InterviewScheduleEmail from "@/emails/interview-schedule";
 import {
+  type InterviewScheduleEmailKind,
   getInterviewScheduleTemplateSetting,
   renderInterviewScheduleTemplateText,
 } from "@/lib/email/interview-template-settings";
 
 export type InterviewScheduleEmailVariables = {
+  kind?: InterviewScheduleEmailKind;
   candidateName: string;
   flowName: string;
   organizerName: string;
   startsAt: Date;
   endsAt: Date;
-  meetingLink: string;
+  location?: string | null;
   note?: string;
 };
 
@@ -31,15 +33,18 @@ function formatDateTime(date: Date) {
   return formatter.format(date).replace(/\//g, "-");
 }
 
-export async function renderInterviewScheduleEmailSubject(flowName: string) {
-  const setting = await getInterviewScheduleTemplateSetting();
+export async function renderInterviewScheduleEmailSubject(
+  flowName: string,
+  kind: InterviewScheduleEmailVariables["kind"] = "created",
+) {
+  const setting = await getInterviewScheduleTemplateSetting(kind);
   return renderInterviewScheduleTemplateText(setting.subjectTemplate, {
     candidateName: "同学",
     flowName,
     organizerName: "讲师",
     startsAt: "",
     endsAt: "",
-    meetingLink: "",
+    location: "",
   });
 }
 
@@ -49,7 +54,7 @@ function getTemplateVariables({
   organizerName,
   startsAt,
   endsAt,
-  meetingLink,
+  location,
 }: InterviewScheduleEmailVariables) {
   return {
     candidateName,
@@ -57,32 +62,33 @@ function getTemplateVariables({
     organizerName,
     startsAt: formatDateTime(startsAt),
     endsAt: formatDateTime(endsAt),
-    meetingLink,
+    location: location ?? "",
   };
 }
 
 export async function renderInterviewScheduleEmail({
+  kind = "created",
   candidateName,
   flowName,
   organizerName,
   startsAt,
   endsAt,
-  meetingLink,
+  location,
   note,
 }: InterviewScheduleEmailVariables) {
-  const setting = await getInterviewScheduleTemplateSetting();
+  const setting = await getInterviewScheduleTemplateSetting(kind);
   const variables = getTemplateVariables({
     candidateName,
     flowName,
     organizerName,
     startsAt,
     endsAt,
-    meetingLink,
-    note,
+    location,
   });
 
   return render(
     <InterviewScheduleEmail
+      kind={kind}
       candidateName={candidateName}
       flowName={flowName}
       titleText={renderInterviewScheduleTemplateText(setting.titleTemplate, variables)}
@@ -90,21 +96,24 @@ export async function renderInterviewScheduleEmail({
       organizerName={organizerName}
       startsAtText={formatDateTime(startsAt)}
       endsAtText={formatDateTime(endsAt)}
-      meetingLink={meetingLink}
+      location={location ?? undefined}
       note={note}
       footerText={setting.footerText}
     />,
   );
 }
 
-export async function renderInterviewScheduleEmailPreview() {
+export async function renderInterviewScheduleEmailPreview(
+  kind: InterviewScheduleEmailKind = "created",
+) {
   return renderInterviewScheduleEmail({
+    kind,
     candidateName: "张三",
     flowName: "2026 免试招新 Demo",
     organizerName: "Demo Lecturer",
     startsAt: new Date("2026-06-05T11:00:00+08:00"),
     endsAt: new Date("2026-06-05T11:30:00+08:00"),
-    meetingLink: "https://vc.feishu.cn/j/123456789",
+    location: "仙林校区大学生活动中心 101",
     note: "请提前准备作品介绍。",
   });
 }

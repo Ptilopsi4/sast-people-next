@@ -6,6 +6,7 @@ import { getFeishuOAuthAccountStatus } from "@/lib/feishu/oauth-account";
 import crypto from "node:crypto";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { getPublicBaseUrl } from "@/lib/app-url";
 
 function base64URLEncode(value: Buffer) {
   return value
@@ -16,7 +17,10 @@ function base64URLEncode(value: Buffer) {
 }
 
 export async function redirectFeishuOAuth() {
-  await verifySession();
+  const session = await verifySession();
+  if (session.role < 2) {
+    throw new Error("只有讲师及以上身份需要绑定飞书授权。");
+  }
 
   const appId = process.env.APP_ID;
   if (!appId) {
@@ -54,6 +58,6 @@ function getFeishuRedirectUri() {
     process.env.FEISHU_OAUTH_REDIRECT_URI ??
     ((process.env.NODE_ENV === "development"
       ? "http://localhost:3000"
-      : "https://nextpeople.sast.fun") + "/api/auth/feishu")
+      : getPublicBaseUrl()) + "/api/auth/feishu")
   );
 }

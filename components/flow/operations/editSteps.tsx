@@ -142,7 +142,7 @@ export const EditSteps = ({ data }: { data: displayFlow }) => {
   return (
     <Sheet open={openEdit} onOpenChange={setOpenEdit}>
       <SheetTrigger asChild>
-        <Button size="sm" variant="ghost" className="h-8 rounded-lg px-2.5 text-primary shadow-none hover:bg-primary/10 hover:text-primary">
+        <Button size="sm" variant="ghost" className="h-10 shrink-0 rounded-lg px-3 text-sm shadow-none text-primary hover:bg-primary/10 hover:text-primary xl:h-8 xl:px-2">
           编辑流程
         </Button>
       </SheetTrigger>
@@ -337,3 +337,5 @@ export const EditSteps = ({ data }: { data: displayFlow }) => {
     </Sheet>
   );
 };
+
+

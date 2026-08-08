@@ -1,4 +1,4 @@
-import { PageTitle } from "@/components/route";
+import { PageHeader, PageTitle } from "@/components/route";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -30,8 +30,8 @@ export default async function Home({
     process.env.NEXT_PUBLIC_LINK_PROFILE_URL || "https://link.sast.fun";
   return (
     <>
-      <div className="flex justify-between items-start pb-4 border-b">
-        <div className="space-y-1">
+      <PageHeader className="items-start border-b pb-4 sm:items-start">
+        <div className="min-w-0 space-y-1">
           <PageTitle />
           {userInfo.updatedAt && (
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -42,18 +42,18 @@ export default async function Home({
           )}
         </div>
         {userInfo.phone && (
-          <div className="flex items-center">
+          <div className="flex w-full items-center sm:w-auto">
             <ShowQrCode uid={userInfo.id.toString()} />
           </div>
         )}
-      </div>
+      </PageHeader>
       {userInfo.studentId === null && !awaitedSearchParams.start ? (
         userInfo.role === 0 ? (
           <div className="flex flex-1 items-center justify-center rounded-xl bg-muted/30 p-8 animate-in fade-in duration-500">
             <div className="flex flex-col items-center gap-3 text-center max-w-sm">
               <Rocket className="h-12 w-12 text-muted-foreground/50" />
               <h3 className="text-2xl font-bold tracking-tight">
-                Welcome to SAST Pass
+                Welcome to SAST People
               </h3>
               <p className="text-sm text-muted-foreground">
                 看起来是新同学呢，在报名之前介绍一下你自己吧！
@@ -70,7 +70,7 @@ export default async function Home({
             <div className="flex flex-col items-center gap-3 text-center max-w-sm">
               <Rocket className="h-12 w-12 text-muted-foreground/50" />
               <h3 className="text-2xl font-bold tracking-tight">
-                Welcome to SAST Pass
+                Welcome to SAST People
               </h3>
               <p className="text-sm text-muted-foreground">
                 如果需要编辑资料，请在此处绑定 SAST Link 账号。
@@ -122,3 +122,4 @@ export default async function Home({
     </>
   );
 }
+

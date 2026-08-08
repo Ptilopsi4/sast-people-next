@@ -32,6 +32,10 @@ const actionLabels: Record<string, string> = {
   "email.batch.create": "创建邮件批次",
   "email.batch_send": "发送邮件批次",
   "email.recover_stale": "恢复中断邮件",
+  "email.delivery_retry": "重试单封邮件",
+  "email.test_send": "测试发送邮件",
+  "email.template.update": "更新邮件模板",
+  "email.template.reset": "重置邮件模板",
   "flow.create": "创建流程",
   "flow.update": "更新流程",
   "flow.delete": "删除流程",
@@ -54,6 +58,7 @@ const actionLabels: Record<string, string> = {
   "evaluation.reopen_and_create": "重开并创建面评",
   "evaluation.approve": "通过面评",
   "evaluation.reject": "驳回面评",
+  "evaluation.unapprove": "撤销通过",
   "evaluation.reopen": "重开面评",
 };
 

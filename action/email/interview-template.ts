@@ -4,13 +4,16 @@ import { db } from "@/db/drizzle";
 import { emailTemplateContent } from "@/db/schema";
 import { verifyRole } from "@/lib/dal";
 import {
-  defaultInterviewScheduleTemplateSetting,
+  getInterviewScheduleEmailKindByTemplateKey,
+  getInterviewScheduleTemplateDefault,
   getInterviewScheduleTemplateSetting,
-  INTERVIEW_SCHEDULE_TEMPLATE_KEY,
-  interviewScheduleTemplateVariables,
+  interviewScheduleTemplateKeys,
+  listInterviewScheduleTemplateSettings,
+  type InterviewScheduleTemplateKey,
   type InterviewScheduleTemplateSetting,
 } from "@/lib/email/interview-template-settings";
 import { renderInterviewScheduleEmailPreview } from "@/lib/email/interview-schedule";
+import { writeOperationAudit } from "@/lib/operation-audit";
 import { logServerError } from "@/lib/server-error-log";
 import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
@@ -23,9 +26,23 @@ type InterviewScheduleTemplateValues = Omit<
 const hasRequiredVariables = (value: string, variables: readonly string[]) =>
   variables.every((variable) => value.includes(`{${variable}}`));
 
+function normalizeInterviewTemplateKey(
+  templateKey: string,
+): InterviewScheduleTemplateKey {
+  const allowedKeys = Object.values(interviewScheduleTemplateKeys);
+  return allowedKeys.includes(templateKey as InterviewScheduleTemplateKey)
+    ? (templateKey as InterviewScheduleTemplateKey)
+    : interviewScheduleTemplateKeys.created;
+}
+
 export async function getInterviewScheduleEmailTemplate() {
   await verifyRole(3);
   return getInterviewScheduleTemplateSetting();
+}
+
+export async function listInterviewScheduleEmailTemplates() {
+  await verifyRole(3);
+  return listInterviewScheduleTemplateSettings();
 }
 
 export async function getInterviewScheduleEmailPreview() {
@@ -33,10 +50,23 @@ export async function getInterviewScheduleEmailPreview() {
   return renderInterviewScheduleEmailPreview();
 }
 
+export async function getInterviewScheduleEmailPreviews() {
+  await verifyRole(3);
+  const entries = await Promise.all(
+    Object.values(interviewScheduleTemplateKeys).map(async (templateKey) => {
+      const kind = getInterviewScheduleEmailKindByTemplateKey(templateKey);
+      return [templateKey, await renderInterviewScheduleEmailPreview(kind)] as const;
+    }),
+  );
+  return Object.fromEntries(entries) as Record<InterviewScheduleTemplateKey, string>;
+}
+
 export async function updateInterviewScheduleEmailTemplate(
+  templateKey: string,
   values: InterviewScheduleTemplateValues,
 ) {
   const session = await verifyRole(3);
+  const normalizedTemplateKey = normalizeInterviewTemplateKey(templateKey);
 
   const normalized = {
     subjectTemplate: values.subjectTemplate.trim(),
@@ -58,18 +88,17 @@ export async function updateInterviewScheduleEmailTemplate(
     return { ok: false, message: "落款不能为空。" };
   }
   if (!hasRequiredVariables(normalized.subjectTemplate, ["flowName"])) {
-    return { ok: false, message: "邮件标题必须保留 {flowName} 变量。" };
+    return { ok: false, message: "邮件标题需要包含 {flowName}，用于替换招新流程名称。" };
   }
   if (
     !hasRequiredVariables(
       normalized.bodyTemplate,
-      interviewScheduleTemplateVariables,
+      ["candidateName", "flowName"],
     )
   ) {
     return {
       ok: false,
-      message:
-        "正文说明必须保留候选人、流程、讲师、开始时间、结束时间和会议链接变量。",
+      message: "正文里需要包含 {candidateName} 和 {flowName}，方便系统替换同学姓名和流程名称。",
     };
   }
 
@@ -77,20 +106,37 @@ export async function updateInterviewScheduleEmailTemplate(
     const [existing] = await db
       .select({ id: emailTemplateContent.id })
       .from(emailTemplateContent)
-      .where(eq(emailTemplateContent.templateKey, INTERVIEW_SCHEDULE_TEMPLATE_KEY))
+      .where(eq(emailTemplateContent.templateKey, normalizedTemplateKey))
       .limit(1);
+    let templateContentId = existing?.id ?? null;
 
     if (existing) {
       await db
         .update(emailTemplateContent)
         .set(normalized)
-        .where(eq(emailTemplateContent.templateKey, INTERVIEW_SCHEDULE_TEMPLATE_KEY));
+        .where(eq(emailTemplateContent.templateKey, normalizedTemplateKey));
     } else {
-      await db.insert(emailTemplateContent).values({
-        templateKey: INTERVIEW_SCHEDULE_TEMPLATE_KEY,
-        ...normalized,
-      });
+      const [created] = await db
+        .insert(emailTemplateContent)
+        .values({
+          templateKey: normalizedTemplateKey,
+          ...normalized,
+        })
+        .returning({ id: emailTemplateContent.id });
+      templateContentId = created?.id ?? null;
     }
+
+    await writeOperationAudit({
+      actorId: session.uid,
+      action: "email.template.update",
+      resourceType: "email_template_content",
+      resourceId: templateContentId,
+      metadata: {
+        templateKey: normalizedTemplateKey,
+        mode: existing ? "update" : "create",
+        changedFields: Object.keys(normalized),
+      },
+    });
 
     revalidatePath("/dashboard/emails");
     return { ok: true };
@@ -100,17 +146,28 @@ export async function updateInterviewScheduleEmailTemplate(
       userId: session.uid,
       role: session.role,
       action: "update-interview-email-template",
+      metadata: { templateKey: normalizedTemplateKey },
     });
     return { ok: false, message: "面试通知模板保存失败，请查看错误日志。" };
   }
 }
 
-export async function resetInterviewScheduleEmailTemplate() {
-  await verifyRole(3);
+export async function resetInterviewScheduleEmailTemplate(templateKey: string) {
+  const session = await verifyRole(3);
+  const normalizedTemplateKey = normalizeInterviewTemplateKey(templateKey);
 
   await db
     .delete(emailTemplateContent)
-    .where(eq(emailTemplateContent.templateKey, INTERVIEW_SCHEDULE_TEMPLATE_KEY));
+    .where(eq(emailTemplateContent.templateKey, normalizedTemplateKey));
+  await writeOperationAudit({
+    actorId: session.uid,
+    action: "email.template.reset",
+    resourceType: "email_template_content",
+    resourceId: null,
+    metadata: {
+      templateKey: normalizedTemplateKey,
+    },
+  });
   revalidatePath("/dashboard/emails");
-  return defaultInterviewScheduleTemplateSetting;
+  return getInterviewScheduleTemplateDefault(normalizedTemplateKey);
 }

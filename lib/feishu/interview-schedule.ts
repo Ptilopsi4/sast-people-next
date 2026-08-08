@@ -2,6 +2,7 @@ import "server-only";
 
 import { getFeishuClient } from "@/lib/feishu/client";
 import { logServerError } from "@/lib/server-error-log";
+import * as lark from "@larksuiteoapi/node-sdk";
 
 const DEFAULT_TIMEZONE = "Asia/Shanghai";
 
@@ -10,9 +11,10 @@ export type CreateFeishuInterviewScheduleInput = {
   organizerOpenId: string;
   summary: string;
   description?: string;
+  location?: string | null;
   startsAt: Date;
   endsAt: Date;
-  attendeeEmail?: string | null;
+  attendeeOpenId?: string | null;
   timezone?: string;
   idempotencyKey: string;
 };
@@ -20,8 +22,10 @@ export type CreateFeishuInterviewScheduleInput = {
 export type CreatedFeishuInterviewSchedule = {
   eventId: string;
   reserveId?: string;
+  meetingId?: string;
   meetingNo?: string;
   meetingLink: string;
+  scheduleLink?: string;
 };
 
 export type UpdateFeishuInterviewScheduleInput = {
@@ -32,8 +36,10 @@ export type UpdateFeishuInterviewScheduleInput = {
   currentMeetingLink: string;
   summary: string;
   description?: string;
+  location?: string | null;
   startsAt: Date;
   endsAt: Date;
+  attendeeOpenId?: string | null;
   timezone?: string;
 };
 
@@ -43,9 +49,20 @@ export type CancelFeishuInterviewScheduleInput = {
   reserveId?: string | null;
 };
 
-export type CreateFeishuMeetingMinuteInput = {
+export type GetFeishuMinuteInfoInput = {
   accessToken: string;
-  eventId: string;
+  minuteToken: string;
+};
+
+export type FeishuMinuteInfo = {
+  token?: string;
+  ownerId?: string;
+  createTime?: string;
+  title?: string;
+  cover?: string;
+  duration?: string;
+  url: string;
+  noteId?: string;
 };
 
 const toFeishuTimestamp = (date: Date) =>
@@ -62,8 +79,115 @@ type FeishuFreebusyResponse = {
   };
 };
 
+function getFeishuErrorPayload(error: unknown) {
+  if (!error || typeof error !== "object") return null;
+  const response = "response" in error
+    ? (error as { response?: { data?: unknown } }).response
+    : null;
+  const data = response?.data;
+  return data && typeof data === "object"
+    ? data as { code?: number; msg?: string }
+    : null;
+}
+
+export function isFeishuEventNotFoundError(error: unknown) {
+  const payload = getFeishuErrorPayload(error);
+  return payload?.code === 193001 || payload?.msg === "event not found";
+}
+
+export function isFeishuInternalServiceError(error: unknown) {
+  const payload = getFeishuErrorPayload(error);
+  return payload?.code === 190003 || payload?.msg === "internal service error";
+}
+
+function logFeishuErrorToConsole(action: string, error: unknown) {
+  if (process.env.NODE_ENV === "production") return;
+  const payload = getFeishuErrorPayload(error);
+  console.error(action, payload ?? error);
+}
+
 function hasOverlap(startA: Date, endA: Date, startB: Date, endB: Date) {
   return startA < endB && startB < endA;
+}
+
+function normalizeMobile(value: string) {
+  return value.replace(/[^\d+]/g, "");
+}
+
+export async function getFeishuOpenIdByMobile(mobile: string) {
+  const normalizedMobile = normalizeMobile(mobile);
+  if (!normalizedMobile) return null;
+
+  try {
+    const res = await getFeishuClient().contact.v3.user.batchGetId({
+      params: {
+        user_id_type: "open_id",
+      },
+      data: {
+        mobiles: [normalizedMobile],
+      },
+    });
+
+    if (res.code && res.code !== 0) {
+      throw new Error(`get feishu user id by mobile failed: ${res.msg ?? res.code}`);
+    }
+
+    return res.data?.user_list?.find((item) => item.mobile === normalizedMobile)?.user_id
+      ?? res.data?.user_list?.[0]?.user_id
+      ?? null;
+  } catch (error) {
+    logServerError("feishu:contactUser", error, {
+      action: "get-feishu-open-id-by-mobile",
+      metadata: {
+        hasMobile: Boolean(normalizedMobile),
+      },
+    });
+    return null;
+  }
+}
+
+async function addFeishuCalendarUserAttendees({
+  accessToken,
+  eventId,
+  openIds,
+}: {
+  accessToken: string;
+  eventId: string;
+  openIds: Array<string | null | undefined>;
+}) {
+  const attendees = Array.from(new Set(openIds.filter((id): id is string => Boolean(id))))
+    .map((userId) => ({
+      type: "user" as const,
+      user_id: userId,
+    }));
+  if (attendees.length === 0) return;
+
+  try {
+    await getFeishuClient().calendar.v4.calendarEventAttendee.create(
+      {
+        path: {
+          calendar_id: "primary",
+          event_id: eventId,
+        },
+        params: {
+          user_id_type: "open_id",
+        },
+        data: {
+          need_notification: true,
+          attendees,
+        },
+      },
+      lark.withUserAccessToken(accessToken),
+    );
+  } catch (error) {
+    logServerError("feishu:calendarEventAttendee", error, {
+      action: "create-feishu-calendar-user-attendees",
+      metadata: {
+        eventId,
+        attendeeCount: attendees.length,
+      },
+    });
+  }
 }
 
 async function assertOrganizerIsAvailable({
@@ -94,11 +218,7 @@ async function assertOrganizerIsAvailable({
           user_id_type: "open_id",
         },
       },
-      {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      },
+      lark.withUserAccessToken(accessToken),
     );
   } catch (error) {
     logServerError("feishu:freebusy", error, {
@@ -144,18 +264,15 @@ export async function createFeishuInterviewSchedule({
   organizerOpenId,
   summary,
   description,
+  location,
   startsAt,
   endsAt,
-  attendeeEmail,
+  attendeeOpenId,
   timezone = DEFAULT_TIMEZONE,
   idempotencyKey,
 }: CreateFeishuInterviewScheduleInput): Promise<CreatedFeishuInterviewSchedule> {
   const client = getFeishuClient();
-  const authOptions = {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  };
+  const authOptions = lark.withUserAccessToken(accessToken);
 
   await assertOrganizerIsAvailable({
     accessToken,
@@ -164,105 +281,69 @@ export async function createFeishuInterviewSchedule({
     endsAt,
   });
 
-  const reserveRes = await client.vc.v1.reserve.apply(
-    {
-      data: {
-        end_time: toFeishuTimestamp(endsAt),
-        owner_id: organizerOpenId,
-        meeting_settings: {
-          topic: summary,
-          meeting_initial_type: 1,
-          meeting_connect: true,
-          assign_host_list: [
-            {
-              user_type: 1,
-              id: organizerOpenId,
-            },
-          ],
-        },
-      },
-      params: {
-        user_id_type: "open_id",
-      },
+  const eventPayload = {
+    path: {
+      calendar_id: "primary",
     },
-    authOptions,
-  );
-
-  const reserve = reserveRes.data?.reserve;
-  const meetingLink = reserve?.url ?? reserve?.app_link;
-  if (!meetingLink) {
-    throw new Error(`create feishu meeting failed: ${reserveRes.msg ?? reserveRes.code ?? "unknown"}`);
-  }
-
-  const eventRes = await client.calendar.v4.calendarEvent.create(
-    {
-      path: {
-        calendar_id: "primary",
-      },
-      params: {
-        idempotency_key: idempotencyKey,
-        user_id_type: "open_id",
-      },
-      data: {
-        summary,
+    params: {
+      idempotency_key: idempotencyKey,
+      user_id_type: "open_id" as const,
+    },
+    data: {
+      summary,
+      description: [
         description,
-        need_notification: true,
-        start_time: {
-          timestamp: toFeishuTimestamp(startsAt),
-          timezone,
-        },
-        end_time: {
-          timestamp: toFeishuTimestamp(endsAt),
-          timezone,
-        },
-        attendee_ability: "none",
-        free_busy_status: "busy",
-        reminders: [{ minutes: 15 }],
-        vchat: {
-          vc_type: "third_party_meeting",
-          icon_type: "vc",
-          meeting_url: meetingLink,
-          description: "飞书会议",
-        },
+        location ? `地点：${location}` : null,
+      ].filter(Boolean).join("\n") || undefined,
+      location: location ? { name: location } : undefined,
+      need_notification: true,
+      start_time: {
+        timestamp: toFeishuTimestamp(startsAt),
+        timezone,
+      },
+      end_time: {
+        timestamp: toFeishuTimestamp(endsAt),
+        timezone,
+      },
+      attendee_ability: "none" as const,
+      free_busy_status: "busy" as const,
+      reminders: [{ minutes: 15 }],
+      vchat: {
+        vc_type: "vc" as const,
+        icon_type: "vc" as const,
+        description: "飞书会议",
       },
     },
-    authOptions,
-  );
+  };
+
+  let eventRes: Awaited<ReturnType<typeof client.calendar.v4.calendarEvent.create>>;
+  try {
+    eventRes = await client.calendar.v4.calendarEvent.create(eventPayload, authOptions);
+  } catch (error) {
+    logFeishuErrorToConsole("create-feishu-calendar-event failed", error);
+    throw error;
+  }
 
   const event = eventRes.data?.event;
   if (!event?.event_id) {
     throw new Error(`create feishu calendar event failed: ${eventRes.msg ?? eventRes.code ?? "unknown"}`);
   }
-
-  if (attendeeEmail) {
-    await client.calendar.v4.calendarEventAttendee.create(
-      {
-        path: {
-          calendar_id: "primary",
-          event_id: event.event_id,
-        },
-        params: {
-          user_id_type: "open_id",
-        },
-        data: {
-          need_notification: true,
-          attendees: [
-            {
-              type: "third_party",
-              third_party_email: attendeeEmail,
-            },
-          ],
-        },
-      },
-      authOptions,
-    );
+  const meetingLink = event.vchat?.meeting_url;
+  if (!meetingLink) {
+    throw new Error("飞书日程已创建，但没有返回会议链接。请检查飞书日历会议能力是否已开通。");
   }
+  await addFeishuCalendarUserAttendees({
+    accessToken,
+    eventId: event.event_id,
+    openIds: [organizerOpenId, attendeeOpenId],
+  });
 
   return {
     eventId: event.event_id,
-    reserveId: reserve?.id,
-    meetingNo: reserve?.meeting_no,
+    meetingId: event.vchat?.vc_info?.unique_id,
+    meetingNo: event.vchat?.vc_info?.meeting_no,
     meetingLink,
+    scheduleLink: event.app_link,
   };
 }
 
@@ -274,16 +355,14 @@ export async function updateFeishuInterviewSchedule({
   currentMeetingLink,
   summary,
   description,
+  location,
   startsAt,
   endsAt,
+  attendeeOpenId,
   timezone = DEFAULT_TIMEZONE,
 }: UpdateFeishuInterviewScheduleInput): Promise<CreatedFeishuInterviewSchedule> {
   const client = getFeishuClient();
-  const authOptions = {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  };
+  const authOptions = lark.withUserAccessToken(accessToken);
 
   let meetingLink = currentMeetingLink;
   let meetingNo: string | undefined;
@@ -324,47 +403,79 @@ export async function updateFeishuInterviewSchedule({
     meetingNo = reserve?.meeting_no;
   }
 
-  const eventRes = await client.calendar.v4.calendarEvent.patch(
-    {
-      path: {
-        calendar_id: "primary",
-        event_id: eventId,
-      },
-      params: {
-        user_id_type: "open_id",
-      },
-      data: {
-        summary,
-        description,
-        need_notification: true,
-        start_time: {
-          timestamp: toFeishuTimestamp(startsAt),
-          timezone,
-        },
-        end_time: {
-          timestamp: toFeishuTimestamp(endsAt),
-          timezone,
-        },
-        vchat: {
-          vc_type: "third_party_meeting",
-          icon_type: "vc",
-          meeting_url: meetingLink,
-          description: "飞书会议",
-        },
-      },
+  const eventDescription = [
+    description,
+    location ? `地点：${location}` : null,
+    `飞书会议：${meetingLink}`,
+  ].filter(Boolean).join("\n");
+  const eventData = {
+    summary,
+    description: eventDescription,
+    location: location ? { name: location } : undefined,
+    need_notification: true,
+    start_time: {
+      timestamp: toFeishuTimestamp(startsAt),
+      timezone,
     },
-    authOptions,
-  );
+    end_time: {
+      timestamp: toFeishuTimestamp(endsAt),
+      timezone,
+    },
+    ...(!reserveId
+      ? {
+          vchat: {
+            vc_type: "vc" as const,
+            icon_type: "vc" as const,
+            description: "飞书会议",
+          },
+        }
+      : {}),
+  };
+
+  let eventRes: Awaited<ReturnType<typeof client.calendar.v4.calendarEvent.patch>>;
+  try {
+    eventRes = await client.calendar.v4.calendarEvent.patch(
+      {
+        path: {
+          calendar_id: "primary",
+          event_id: eventId,
+        },
+        params: {
+          user_id_type: "open_id",
+        },
+        data: eventData,
+      },
+      authOptions,
+    );
+  } catch (error) {
+    logFeishuErrorToConsole("update-feishu-calendar-event failed", error);
+    throw error;
+  }
 
   if (eventRes.code && eventRes.code !== 0) {
     throw new Error(`update feishu calendar event failed: ${eventRes.msg ?? eventRes.code}`);
   }
 
+  meetingLink = reserveId
+    ? meetingLink
+    : eventRes.data?.event?.vchat?.meeting_url ?? meetingLink;
+  if (!meetingLink) {
+    throw new Error("飞书日程已更新，但没有返回会议链接。请检查飞书日历会议能力是否已开通。");
+  }
+
+  await addFeishuCalendarUserAttendees({
+    accessToken,
+    eventId,
+    openIds: [organizerOpenId, attendeeOpenId],
+  });
+
   return {
     eventId,
     reserveId: reserveId ?? undefined,
-    meetingNo,
+    meetingId: eventRes.data?.event?.vchat?.vc_info?.unique_id,
+    meetingNo: meetingNo ?? eventRes.data?.event?.vchat?.vc_info?.meeting_no,
     meetingLink,
+    scheduleLink: eventRes.data?.event?.app_link,
   };
 }
 
@@ -374,11 +485,7 @@ export async function cancelFeishuInterviewSchedule({
   reserveId,
 }: CancelFeishuInterviewScheduleInput) {
   const client = getFeishuClient();
-  const authOptions = {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-  };
+  const authOptions = lark.withUserAccessToken(accessToken);
 
   if (eventId) {
     const eventRes = await client.calendar.v4.calendarEvent.delete(
@@ -415,32 +522,39 @@ export async function cancelFeishuInterviewSchedule({
   }
 }
 
-export async function createFeishuMeetingMinute({
+export async function getFeishuMinuteInfo({
   accessToken,
-  eventId,
-}: CreateFeishuMeetingMinuteInput) {
-  const res = await getFeishuClient().calendar.v4.calendarEventMeetingMinute.create(
+  minuteToken,
+}: GetFeishuMinuteInfoInput): Promise<FeishuMinuteInfo> {
+  const res = await getFeishuClient().minutes.v1.minute.get(
     {
       path: {
-        calendar_id: "primary",
-        event_id: eventId,
+        minute_token: minuteToken,
+      },
+      params: {
+        user_id_type: "open_id",
       },
     },
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-    },
+    lark.withUserAccessToken(accessToken),
   );
 
   if (res.code && res.code !== 0) {
-    throw new Error(`create feishu meeting minute failed: ${res.msg ?? res.code}`);
+    throw new Error(`get feishu minute failed: ${res.msg ?? res.code}`);
   }
 
-  const docUrl = res.data?.doc_url;
-  if (!docUrl) {
-    throw new Error("create feishu meeting minute failed: doc_url is empty");
+  const minute = res.data?.minute;
+  if (!minute?.url) {
+    throw new Error("get feishu minute failed: url is empty");
   }
 
-  return { docUrl };
+  return {
+    token: minute.token,
+    ownerId: minute.owner_id,
+    createTime: minute.create_time,
+    title: minute.title,
+    cover: minute.cover,
+    duration: minute.duration,
+    url: minute.url,
+    noteId: minute.note_id,
+  };
 }

@@ -1,9 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import {
-  ExternalLink,
-} from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { ExternalLink } from "lucide-react";
 import { toast } from "sonner";
 import {
   Table,
@@ -16,14 +14,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Badge } from "@/components/ui/badge";
-import { createEvaluation, rejectCandidate, reopenAndEvaluate } from "@/action/user-flow/evaluation";
+import { createEvaluation } from "@/action/user-flow/evaluation";
 import {
   cancelInterviewSchedule,
+  confirmInterviewScheduleEnded,
   createInterviewSchedule,
-  generateInterviewMeetingMinute,
+  previewInterviewScheduleEmail,
 } from "@/action/user-flow/interviewSchedule";
-import { getCurrentFeishuOAuthStatus, redirectFeishuOAuth } from "@/action/user/feishuOAuth";
 import {
   Dialog,
   DialogContent,
@@ -33,45 +30,85 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { externalHref } from "@/lib/link";
+import { FeishuOAuthStatus } from "@/components/feishu-oauth-status";
 
 type Candidate = {
   userFlowId: number;
   uid: number;
   name: string;
   studentId: string | null;
-  phoneNumber: string | null;
+  qq: string | null;
   status: string | null;
   portfolioLink: string | null;
   evalId: number | null;
   evalContent: string | null;
   evalMeetingLink: string | null;
+  evalRecommendation: "passed" | "failed" | null;
   evalStatus: string | null;
   scheduleId: number | null;
   scheduleMeetingLink: string | null;
+  scheduleLink: string | null;
   scheduleMeetingMinuteLink: string | null;
+  scheduleLocation: string | null;
   scheduleStartsAt: Date | string | null;
   scheduleEndsAt: Date | string | null;
   scheduleStatus: string | null;
+  scheduleMeetingStatus: string | null;
+  scheduleMeetingEndedAt: Date | string | null;
 };
 
-const evalStatusBadge = (
+const evalStatusLabel = (
   evalStatus: string | null,
   flowStatus: string | null,
   scheduleMeetingLink: string | null,
   scheduleEnded: boolean,
 ) => {
-  if (evalStatus === "approved") return <Badge variant="outline" className="border-primary/30 bg-primary/10 text-primary">已通过</Badge>;
-  if (evalStatus === "rejected") return <Badge variant="outline" className="border-destructive/30 bg-destructive/10 text-destructive">面评已驳回</Badge>;
-  if (evalStatus === "submitted") return <Badge variant="outline" className="border-chart-3/30 bg-chart-3/10 text-chart-3">待审核</Badge>;
-  if (flowStatus === "failed") return <Badge variant="outline" className="border-destructive/30 bg-destructive/10 text-destructive">不通过</Badge>;
-  if (flowStatus === "passed") return <Badge variant="outline" className="border-primary/30 bg-primary/10 text-primary">已通过</Badge>;
-  if (!scheduleMeetingLink) return <Badge variant="outline" className="border-muted-foreground/30 bg-muted text-muted-foreground">待预约</Badge>;
-  if (!scheduleEnded) return <Badge variant="outline" className="border-chart-2/30 bg-chart-2/10 text-chart-2">待面试</Badge>;
-  return <Badge variant="outline" className="border-muted-foreground/30 bg-muted text-muted-foreground">待评估</Badge>;
+  if (evalStatus === "approved" || flowStatus === "passed") {
+    return { text: "已通过", className: "text-primary" };
+  }
+  if (evalStatus === "rejected") {
+    return { text: "不通过", className: "text-destructive" };
+  }
+  if (evalStatus === "submitted") {
+    return { text: "待审核", className: "text-foreground" };
+  }
+  if (flowStatus === "failed") {
+    return { text: "不通过", className: "text-destructive" };
+  }
+  if (!scheduleMeetingLink) {
+    return { text: "待预约", className: "text-muted-foreground" };
+  }
+  if (!scheduleEnded) {
+    return { text: "待面试", className: "text-muted-foreground" };
+  }
+  return { text: "待评估", className: "text-muted-foreground" };
 };
 
-const actionTextClass =
-  "whitespace-nowrap text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline disabled:pointer-events-none disabled:opacity-50";
+const EvalStatusText = ({
+  evalStatus,
+  flowStatus,
+  scheduleMeetingLink,
+  scheduleEnded,
+}: {
+  evalStatus: string | null;
+  flowStatus: string | null;
+  scheduleMeetingLink: string | null;
+  scheduleEnded: boolean;
+}) => {
+  const status = evalStatusLabel(
+    evalStatus,
+    flowStatus,
+    scheduleMeetingLink,
+    scheduleEnded,
+  );
+  return (
+    <span className={`text-sm ${status.className}`}>
+      {status.text}
+    </span>
+  );
+};
+
+
 
 const getCandidateStatusKey = (candidate: Candidate) => {
   if (candidate.evalStatus === "approved" || candidate.status === "passed") return "accepted";
@@ -85,7 +122,7 @@ const summaryItems = [
   { key: "waiting", label: "待评估" },
   { key: "pending", label: "待审核" },
   { key: "accepted", label: "已通过" },
-  { key: "evalRejected", label: "面评驳回" },
+  { key: "evalRejected", label: "不通过" },
   { key: "rejected", label: "不通过" },
 ];
 
@@ -139,99 +176,148 @@ const getTime = (value: Date | string | null) => {
   return Number.isNaN(time) ? null : time;
 };
 
-function StatusCountPill({
-  label,
-  value,
+function CandidateIdentity({
+  name,
+  studentId,
+  qq,
 }: {
-  label: string;
-  value: number;
+  name: string;
+  studentId: string | null;
+  qq: string | null;
 }) {
+  const meta = [
+    studentId || null,
+    qq ? `QQ ${qq}` : null,
+  ].filter(Boolean);
+
   return (
-    <div
-      className="inline-flex items-center gap-1.5 rounded-md border bg-muted/20 px-2.5 py-1 text-xs text-muted-foreground"
-    >
-      <span>{label}</span>
-      <span className="font-semibold tabular-nums text-foreground">{value}</span>
+    <div className="min-w-0 space-y-0.5">
+      <p className="truncate text-sm font-medium leading-5 text-foreground" title={name}>
+        {name}
+      </p>
+      {meta.length > 0 && (
+        <p className="truncate text-xs tabular-nums text-muted-foreground" title={meta.join(" · ")}>
+          {meta.join(" · ")}
+        </p>
+      )}
     </div>
   );
 }
 
 const PortfolioLink = ({ value }: { value: string | null }) => {
-  if (!value) return <span className="text-xs text-muted-foreground">未填写</span>;
+  if (!value) {
+    return <span className="text-sm text-muted-foreground">—</span>;
+  }
 
   return (
     <a
       href={externalHref(value)}
       target="_blank"
       rel="noopener noreferrer"
-      className="inline-flex max-w-full items-center gap-1 text-sm text-muted-foreground hover:text-primary hover:underline"
+      className="inline-flex items-center gap-1 text-sm text-foreground/80 hover:text-foreground"
     >
-      <span className="truncate">查看作品</span>
-      <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+      作品
+      <ExternalLink className="size-3.5 shrink-0 opacity-50" />
     </a>
   );
 };
 
 const ScheduleInfo = ({ candidate }: { candidate: Candidate }) => {
   if (!candidate.scheduleMeetingLink) {
-    return (
-      <span className="text-xs text-muted-foreground">
-        未预约
-      </span>
-    );
+    return <span className="text-sm text-muted-foreground">未预约</span>;
   }
 
   const startsAt = formatScheduleTime(candidate.scheduleStartsAt);
   const endsAt = formatScheduleTime(candidate.scheduleEndsAt);
+  const timeRange = startsAt
+    ? `${startsAt}${endsAt ? ` – ${endsAt}` : ""}`
+    : endsAt;
+  const hasDistinctScheduleLink =
+    Boolean(candidate.scheduleLink) &&
+    candidate.scheduleLink !== candidate.scheduleMeetingLink;
 
   return (
-    <div className="flex min-w-0 flex-col gap-1">
-      <a
-        href={externalHref(candidate.scheduleMeetingLink)}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="inline-flex max-w-full items-center gap-1.5 text-sm text-foreground hover:text-primary hover:underline"
-      >
-        <span className="truncate">进入会议</span>
-        <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-      </a>
-      {(startsAt || endsAt) && (
-        <span className="text-xs tabular-nums text-muted-foreground">
-          {startsAt}{endsAt ? ` - ${endsAt}` : ""}
-        </span>
+    <div className="min-w-0 space-y-0.5">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5">
+        <a
+          href={externalHref(candidate.scheduleMeetingLink)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-sm text-foreground/80 hover:text-foreground"
+        >
+          留档会议
+          <ExternalLink className="size-3.5 shrink-0 opacity-50" />
+        </a>
+        {hasDistinctScheduleLink && candidate.scheduleLink && (
+          <a
+            href={externalHref(candidate.scheduleLink)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+          >
+            日程
+            <ExternalLink className="size-3.5 shrink-0 opacity-50" />
+          </a>
+        )}
+      </div>
+      {timeRange && (
+        <p className="text-xs tabular-nums text-muted-foreground">{timeRange}</p>
+      )}
+      {candidate.scheduleLocation && (
+        <p
+          className="truncate text-xs text-muted-foreground"
+          title={candidate.scheduleLocation}
+        >
+          {candidate.scheduleLocation}
+        </p>
       )}
     </div>
   );
 };
 
-function ActionTextButton({
+function ActionButton({
   children,
   disabled,
   onClick,
+  tone = "default",
 }: {
-  children: React.ReactNode;
+  children: ReactNode;
   disabled?: boolean;
   onClick: () => void;
+  tone?: "default" | "primary" | "danger";
 }) {
+  const toneClass =
+    tone === "primary"
+      ? "text-primary hover:text-primary"
+      : tone === "danger"
+        ? "text-destructive hover:text-destructive"
+        : "text-muted-foreground hover:text-foreground";
+
   return (
-    <button
+    <Button
       type="button"
-      className={actionTextClass}
+      size="sm"
+      variant="ghost"
       disabled={disabled}
       onClick={onClick}
+      className={`h-8 px-2 text-sm font-normal shadow-none ${toneClass}`}
     >
       {children}
-    </button>
+    </Button>
   );
 }
 
 export const EvaluationTable = ({
   candidates,
   role,
+  targetUserFlowId,
+  targetScheduleId,
   onRefresh,
 }: {
   candidates: Candidate[];
   role: number;
+  targetUserFlowId?: number;
+  targetScheduleId?: number;
   onRefresh: () => void;
 }) => {
   const safeCandidates = Array.isArray(candidates) ? candidates : [];
@@ -239,43 +325,34 @@ export const EvaluationTable = ({
   const [schedulingId, setSchedulingId] = useState<number | null>(null);
   const [content, setContent] = useState("");
   const [meetingLink, setMeetingLink] = useState("");
+  const [recommendation, setRecommendation] = useState<"passed" | "failed">("passed");
   const [scheduleStartsAt, setScheduleStartsAt] = useState("");
   const [scheduleEndsAt, setScheduleEndsAt] = useState("");
+  const [scheduleLocation, setScheduleLocation] = useState("");
   const [scheduleNote, setScheduleNote] = useState("");
   const [scheduleLoading, setScheduleLoading] = useState(false);
-  const [minuteLoading, setMinuteLoading] = useState(false);
-  const [loadingId, setLoadingId] = useState<number | null>(null);
-  const [editMode, setEditMode] = useState<"pass" | "reopen" | null>(null);
-  const [now, setNow] = useState<number | null>(null);
-  const [feishuStatus, setFeishuStatus] = useState<{
-    bound: boolean;
-    accessTokenExpiresAt?: Date | string | null;
+  const [emailPreviewLoading, setEmailPreviewLoading] = useState(false);
+  const [emailPreview, setEmailPreview] = useState<{
+    subject: string;
+    to: string;
+    html: string;
   } | null>(null);
+  const [feishuBound, setFeishuBound] = useState<boolean | null>(null);
+  const [feishuStatusFailed, setFeishuStatusFailed] = useState(false);
+  const [loadingId, setLoadingId] = useState<number | null>(null);
+  const [evaluationError, setEvaluationError] = useState<string | null>(null);
+  const [now, setNow] = useState<number | null>(null);
 
   useEffect(() => {
     setNow(Date.now());
   }, []);
 
-  useEffect(() => {
-    if (!schedulingId) return;
-    let cancelled = false;
-    getCurrentFeishuOAuthStatus()
-      .then((status) => {
-        if (!cancelled) setFeishuStatus(status);
-      })
-      .catch(() => {
-        if (!cancelled) setFeishuStatus({ bound: false });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [schedulingId]);
-
-  const startEdit = (c: Candidate, mode: "pass" | "reopen") => {
+  const startEdit = (c: Candidate) => {
     setEvaluatingId(c.userFlowId);
-    setEditMode(mode);
     setContent(c.evalContent ?? "");
-    setMeetingLink(c.evalMeetingLink ?? c.scheduleMeetingMinuteLink ?? "");
+    setMeetingLink(c.scheduleMeetingMinuteLink ?? c.evalMeetingLink ?? "");
+    setRecommendation(c.evalRecommendation ?? "passed");
+    setEvaluationError(null);
   };
 
   const startSchedule = (c: Candidate) => {
@@ -289,6 +366,7 @@ export const EvaluationTable = ({
         : getDefaultScheduleRange();
     setScheduleStartsAt(range.startsAt);
     setScheduleEndsAt(range.endsAt);
+    setScheduleLocation(c.scheduleLocation ?? "");
     setScheduleNote("");
   };
 
@@ -296,16 +374,19 @@ export const EvaluationTable = ({
     setEvaluatingId(null);
     setContent("");
     setMeetingLink("");
-    setEditMode(null);
+    setRecommendation("passed");
+    setEvaluationError(null);
   };
 
   const cancelSchedule = () => {
     setSchedulingId(null);
-    setFeishuStatus(null);
     setScheduleStartsAt("");
     setScheduleEndsAt("");
+    setScheduleLocation("");
     setScheduleNote("");
     setScheduleLoading(false);
+    setFeishuBound(null);
+    setFeishuStatusFailed(false);
   };
 
   const editingCandidate =
@@ -314,12 +395,22 @@ export const EvaluationTable = ({
     safeCandidates.find((c) => c.userFlowId === schedulingId) ?? null;
 
   const handlePass = async (userFlowId: number) => {
-    if (!content.trim()) return;
+    if (!content.trim()) {
+      setEvaluationError("请填写面评内容后再提交。");
+      return;
+    }
     setLoadingId(userFlowId);
     try {
-      const result = await createEvaluation(userFlowId, content, meetingLink);
+      const result = await createEvaluation(
+        userFlowId,
+        content,
+        recommendation,
+        meetingLink,
+      );
       if (!result.success) {
-        toast.error(result.error?.message ?? "提交失败");
+        const message = result.error?.message ?? "提交失败";
+        setEvaluationError(message);
+        toast.error(message);
         return;
       }
       toast.success("面评已提交，等待管理员审核");
@@ -332,30 +423,19 @@ export const EvaluationTable = ({
     }
   };
 
-  const handleReopen = async (userFlowId: number) => {
-    if (!content.trim()) return;
-    setLoadingId(userFlowId);
+  const handleConfirmScheduleEnded = async (candidate: Candidate) => {
+    if (!candidate.scheduleId) return;
+    setLoadingId(candidate.userFlowId);
     try {
-      await reopenAndEvaluate(userFlowId, content, meetingLink);
-      toast.success("面评已提交，等待管理员审核");
-      cancelEdit();
+      const result = await confirmInterviewScheduleEnded(candidate.scheduleId);
+      if (!result.success) {
+        toast.error(result.error?.message ?? "确认面试结束失败");
+        return;
+      }
+      toast.success("已确认面试结束，可以提交面评");
       onRefresh();
     } catch {
-      toast.error("操作失败");
-    } finally {
-      setLoadingId(null);
-    }
-  };
-
-  const handleReject = async (userFlowId: number) => {
-    setLoadingId(userFlowId);
-    try {
-      await rejectCandidate(userFlowId);
-      toast.success("已设为不通过");
-      cancelEdit();
-      onRefresh();
-    } catch {
-      toast.error("操作失败");
+      toast.error("确认面试结束失败");
     } finally {
       setLoadingId(null);
     }
@@ -366,6 +446,14 @@ export const EvaluationTable = ({
       toast.error("请填写面试开始和结束时间");
       return;
     }
+    if (feishuBound !== true) {
+      toast.error(
+        feishuStatusFailed
+          ? "飞书授权状态检查失败，请先在上方重新绑定飞书后再发起日程。"
+          : "请先绑定飞书账号后再发起面试日程。",
+      );
+      return;
+    }
 
     setScheduleLoading(true);
     try {
@@ -373,19 +461,51 @@ export const EvaluationTable = ({
         userFlowId,
         startsAt: scheduleStartsAt,
         endsAt: scheduleEndsAt,
+        location: scheduleLocation,
         note: scheduleNote,
       });
       if (!result.success) {
         toast.error(result.error?.message ?? "飞书日程创建失败");
         return;
       }
-      toast.success("飞书会议和日程已创建，预约邮件已发送");
+      if (result.data.emailWarning) {
+        toast.warning(result.data.emailWarning);
+      } else {
+        toast.success("线下面试日程已创建，预约邮件已发送");
+      }
       cancelSchedule();
       onRefresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "飞书日程创建失败");
     } finally {
       setScheduleLoading(false);
+    }
+  };
+
+  const handlePreviewScheduleEmail = async (userFlowId: number) => {
+    if (!scheduleStartsAt || !scheduleEndsAt) {
+      toast.error("请先填写面试开始和结束时间");
+      return;
+    }
+
+    setEmailPreviewLoading(true);
+    try {
+      const result = await previewInterviewScheduleEmail({
+        userFlowId,
+        startsAt: scheduleStartsAt,
+        endsAt: scheduleEndsAt,
+        location: scheduleLocation,
+        note: scheduleNote,
+      });
+      if (!result.success) {
+        toast.error(result.error?.message ?? "邮件预览生成失败");
+        return;
+      }
+      setEmailPreview(result.data);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "邮件预览生成失败");
+    } finally {
+      setEmailPreviewLoading(false);
     }
   };
 
@@ -402,7 +522,11 @@ export const EvaluationTable = ({
         toast.error(result.error?.message ?? "取消预约失败");
         return;
       }
-      toast.success("面试预约已取消");
+      if (result.emailWarning) {
+        toast.warning(result.emailWarning);
+      } else {
+        toast.success("面试预约已取消，取消邮件已发送");
+      }
       cancelSchedule();
       onRefresh();
     } catch (error) {
@@ -412,31 +536,9 @@ export const EvaluationTable = ({
     }
   };
 
-  const handleGenerateMeetingMinute = async (candidate: Candidate) => {
-    if (!candidate.scheduleId) {
-      toast.error("找不到可生成妙记的面试预约");
-      return;
-    }
-
-    setMinuteLoading(true);
-    try {
-      const result = await generateInterviewMeetingMinute(candidate.scheduleId);
-      if (!result.success) {
-        toast.error(result.error?.message ?? "生成妙记失败");
-        return;
-      }
-      setMeetingLink(result.data.docUrl);
-      toast.success("妙记链接已生成");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "生成妙记失败");
-    } finally {
-      setMinuteLoading(false);
-    }
-  };
-
   if (safeCandidates.length === 0) {
     return (
-      <div className="rounded-xl border bg-card p-10 text-center">
+      <div className="rounded-lg border bg-card p-10 text-center">
         <p className="text-sm font-medium">暂无可评估的候选人</p>
         <p className="mt-1 text-xs text-muted-foreground">
           当前流程还没有可处理的报名人员。
@@ -450,60 +552,56 @@ export const EvaluationTable = ({
     const key = getCandidateStatusKey(candidate);
     statusCounts.set(key, (statusCounts.get(key) ?? 0) + 1);
   }
+  const isTargetCandidate = (candidate: Candidate) =>
+    Boolean(
+      (targetUserFlowId && candidate.userFlowId === targetUserFlowId) ||
+        (targetScheduleId && candidate.scheduleId === targetScheduleId),
+    );
 
   return (
-    <div className="overflow-hidden rounded-xl border bg-card">
-      <div className="flex flex-col gap-3 border-b bg-muted/20 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+    <div className="min-w-0 overflow-hidden rounded-lg border bg-card">
+      <div className="flex flex-col gap-3 border-b border-border/60 px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
         <div className="space-y-1">
           <p className="text-sm font-medium">面评候选人</p>
           <p className="text-xs text-muted-foreground">
-            先为报名同学预约面试会议，面试结束后再提交面评结果。
+            预约面试后提交面评结果
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {summaryItems.map((item) => (
-            <StatusCountPill
-              key={item.key}
-              label={item.label}
-              value={statusCounts.get(item.key) ?? 0}
-            />
-          ))}
-        </div>
+        <p className="text-xs text-muted-foreground">
+          {summaryItems
+            .map(
+              (item) =>
+                `${item.label} ${statusCounts.get(item.key) ?? 0}`,
+            )
+            .join(" · ")}
+        </p>
       </div>
-      <div className="hidden md:block overflow-x-auto">
-        <Table className="table-fixed min-w-[840px]">
-          {role >= 3 ? (
+      <div className="hidden min-w-0 lg:block">
+        <Table className="w-full table-fixed" containerClassName="overflow-x-visible">
+          {role >= 2 ? (
             <colgroup>
+              <col className="w-[26%]" />
+              <col className="w-[10%]" />
+              <col className="w-[22%]" />
               <col className="w-[12%]" />
-              <col className="w-[15%]" />
-              <col className="w-[12%]" />
-              <col className="w-[12%]" />
-              <col className="w-[20%]" />
-              <col className="w-[12%]" />
-              <col className="w-[19%]" />
+              <col className="w-[30%]" />
             </colgroup>
           ) : (
             <colgroup>
-              <col className="w-[15%]" />
-              <col className="w-[20%]" />
-              <col className="w-[16%]" />
-              <col className="w-[22%]" />
-              <col className="w-[12%]" />
-              <col className="w-[15%]" />
+              <col className="w-[32%]" />
+              <col className="w-[14%]" />
+              <col className="w-[30%]" />
+              <col className="w-[24%]" />
             </colgroup>
           )}
           <TableHeader>
-            <TableRow className="bg-muted/30 hover:bg-muted/30">
-              <TableHead className="whitespace-nowrap px-4 py-3 text-xs font-medium text-muted-foreground">学号</TableHead>
-              <TableHead className="whitespace-nowrap px-4 py-3 text-xs font-medium text-muted-foreground">姓名</TableHead>
-              {role >= 3 && (
-                <TableHead className="whitespace-nowrap px-4 py-3 text-xs font-medium text-muted-foreground">手机号</TableHead>
-              )}
-              <TableHead className="whitespace-nowrap px-4 py-3 text-xs font-medium text-muted-foreground">作品</TableHead>
-              <TableHead className="whitespace-nowrap px-4 py-3 text-xs font-medium text-muted-foreground">会议</TableHead>
-              <TableHead className="whitespace-nowrap px-4 py-3 text-xs font-medium text-muted-foreground">状态</TableHead>
+            <TableRow className="border-b border-border/60 hover:bg-transparent">
+              <TableHead className="h-10 px-4 text-xs font-medium text-muted-foreground">候选人</TableHead>
+              <TableHead className="h-10 px-3 text-xs font-medium text-muted-foreground">作品</TableHead>
+              <TableHead className="h-10 px-3 text-xs font-medium text-muted-foreground">会议</TableHead>
+              <TableHead className="h-10 px-3 text-xs font-medium text-muted-foreground">状态</TableHead>
               {role >= 2 && (
-                <TableHead className="whitespace-nowrap px-4 py-3 text-xs font-medium text-muted-foreground">操作</TableHead>
+                <TableHead className="h-10 px-4 text-right text-xs font-medium text-muted-foreground">操作</TableHead>
               )}
             </TableRow>
           </TableHeader>
@@ -512,82 +610,88 @@ export const EvaluationTable = ({
               const isEditing = evaluatingId === c.userFlowId;
               const isRejected = c.status === "failed";
               const busy = loadingId === c.userFlowId;
-              const scheduleEnded =
+              const scheduleEnded = c.scheduleMeetingStatus === "ended";
+              const canConfirmScheduleEnded =
                 now !== null &&
                 Boolean(c.scheduleMeetingLink) &&
-                (getTime(c.scheduleEndsAt) ?? Number.POSITIVE_INFINITY) <= now;
+                !scheduleEnded &&
+                (getTime(c.scheduleStartsAt) ?? Number.POSITIVE_INFINITY) <= now;
               const canEvaluate = scheduleEnded || c.evalStatus !== null || isRejected;
 
               return (
-                <TableRow key={c.userFlowId} className="hover:bg-muted/30">
-                  <TableCell className="whitespace-nowrap px-4 py-3 text-sm tabular-nums">
-                    {c.studentId}
+                <TableRow
+                  key={c.userFlowId}
+                  id={
+                    isTargetCandidate(c)
+                      ? `user-flow-${c.userFlowId}-desktop`
+                      : undefined
+                  }
+                  className={
+                    isTargetCandidate(c)
+                      ? "scroll-mt-24 bg-muted/40 hover:bg-muted/40"
+                      : "border-b border-border/40 last:border-0 hover:bg-muted/15"
+                  }
+                >
+                  <TableCell className="px-4 py-3 align-middle">
+                    <CandidateIdentity
+                      name={c.name}
+                      studentId={c.studentId}
+                      qq={c.qq}
+                    />
                   </TableCell>
-                  <TableCell className="whitespace-nowrap px-4 py-3 text-sm font-medium">
-                    {c.name}
-                  </TableCell>
-                  {role >= 3 && (
-                    <TableCell className="whitespace-nowrap px-4 py-3 text-sm tabular-nums text-muted-foreground">
-                      {c.phoneNumber || "-"}
-                    </TableCell>
-                  )}
-                  <TableCell className="whitespace-nowrap px-4 py-3">
+                  <TableCell className="px-3 py-3 align-middle">
                     <PortfolioLink value={c.portfolioLink} />
                   </TableCell>
-                  <TableCell className="px-4 py-3">
+                  <TableCell className="px-3 py-3 align-middle">
                     <ScheduleInfo candidate={c} />
                   </TableCell>
-                  <TableCell className="whitespace-nowrap px-4 py-3">
-                    {evalStatusBadge(c.evalStatus, c.status, c.scheduleMeetingLink, scheduleEnded)}
+                  <TableCell className="px-3 py-3 align-middle">
+                    <EvalStatusText evalStatus={c.evalStatus} flowStatus={c.status} scheduleMeetingLink={c.scheduleMeetingLink} scheduleEnded={scheduleEnded} />
                   </TableCell>
                   {role >= 2 && (
-                    <TableCell className="whitespace-nowrap px-4 py-3">
+                    <TableCell className="px-4 py-3 align-middle text-right">
                       {!canEvaluate ? (
-                        <div className="flex flex-nowrap items-center gap-3">
-                          <ActionTextButton onClick={() => startSchedule(c)}>
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          <ActionButton onClick={() => startSchedule(c)}>
                             {c.scheduleMeetingLink ? "改约" : "预约"}
-                          </ActionTextButton>
+                          </ActionButton>
                           {c.scheduleMeetingLink && (
-                            <ActionTextButton
+                            <ActionButton
                               disabled={busy}
                               onClick={() => handleCancelSchedule(c)}
                             >
                               {busy ? "处理中" : "取消"}
-                            </ActionTextButton>
+                            </ActionButton>
+                          )}
+                          {canConfirmScheduleEnded && (
+                            <ActionButton
+                              disabled={busy}
+                              onClick={() => handleConfirmScheduleEnded(c)}
+                            >
+                              {busy ? "处理中" : "确认结束"}
+                            </ActionButton>
                           )}
                         </div>
                       ) : isEditing ? (
-                        <div className="text-sm text-muted-foreground">
-                          正在编辑面评
-                        </div>
+                        <span className="text-xs text-muted-foreground">正在编辑…</span>
                       ) : c.evalStatus === "submitted" ? (
-                        <div className="flex flex-nowrap items-center gap-3">
-                          <ActionTextButton onClick={() => startEdit(c, "pass")}>
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          <ActionButton onClick={() => startEdit(c)}>
                             修改
-                          </ActionTextButton>
+                          </ActionButton>
                         </div>
-                      ) : c.evalStatus === "approved" ? (
-                        <span className="text-sm text-muted-foreground">-</span>
-                      ) : c.evalStatus === "rejected" ? (
-                        <span className="text-sm text-muted-foreground">-</span>
+                      ) : c.evalStatus === "approved" || c.evalStatus === "rejected" ? (
+                        <span className="text-xs text-muted-foreground">已归档</span>
                       ) : isRejected ? (
-                        <ActionTextButton onClick={() => startEdit(c, "reopen")}>
-                          改为通过
-                        </ActionTextButton>
+                        <span className="text-xs text-muted-foreground">已结束</span>
                       ) : (
-                        <div className="flex flex-nowrap items-center gap-3">
-                          <ActionTextButton onClick={() => startSchedule(c)}>
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          <ActionButton onClick={() => startSchedule(c)}>
                             改约
-                          </ActionTextButton>
-                          <ActionTextButton onClick={() => startEdit(c, "pass")}>
-                            通过
-                          </ActionTextButton>
-                          <ActionTextButton
-                            disabled={busy}
-                            onClick={() => handleReject(c.userFlowId)}
-                          >
-                            {busy ? "处理中" : "不通过"}
-                          </ActionTextButton>
+                          </ActionButton>
+                          <ActionButton tone="primary" onClick={() => startEdit(c)}>
+                            填写面评
+                          </ActionButton>
                         </div>
                       )}
                     </TableCell>
@@ -600,54 +704,66 @@ export const EvaluationTable = ({
       </div>
 
       {/* Mobile card view */}
-      <div className="md:hidden flex flex-col divide-y divide-border">
+      <div className="flex flex-col divide-y divide-border lg:hidden">
         {safeCandidates.map((c) => {
           const isEditing = evaluatingId === c.userFlowId;
           const isRejected = c.status === "failed";
           const busy = loadingId === c.userFlowId;
-          const scheduleEnded =
+          const scheduleEnded = c.scheduleMeetingStatus === "ended";
+          const canConfirmScheduleEnded =
             now !== null &&
             Boolean(c.scheduleMeetingLink) &&
-            (getTime(c.scheduleEndsAt) ?? Number.POSITIVE_INFINITY) <= now;
+            !scheduleEnded &&
+            (getTime(c.scheduleStartsAt) ?? Number.POSITIVE_INFINITY) <= now;
           const canEvaluate = scheduleEnded || c.evalStatus !== null || isRejected;
 
           return (
-            <div key={c.userFlowId} className="flex flex-col gap-3 p-4 transition-colors hover:bg-muted/40">
-              <div className="flex items-center justify-between">
-                <div className="min-w-0">
-                  <span className="font-semibold">{c.name}</span>
-                  <span className="ml-2 text-sm">
-                    {c.studentId}
-                  </span>
-                </div>
-                {evalStatusBadge(c.evalStatus, c.status, c.scheduleMeetingLink, scheduleEnded)}
+            <div
+              key={c.userFlowId}
+              id={
+                isTargetCandidate(c)
+                  ? `user-flow-${c.userFlowId}-mobile`
+                  : undefined
+              }
+              className={
+                isTargetCandidate(c)
+                  ? "flex scroll-mt-24 flex-col gap-3 bg-muted/30 p-4"
+                  : "flex flex-col gap-3 p-4 transition-colors hover:bg-muted/40"
+              }
+            >
+              <div className="flex items-start justify-between gap-3">
+                <CandidateIdentity
+                  name={c.name}
+                  studentId={c.studentId}
+                  qq={c.qq}
+                />
+                <EvalStatusText evalStatus={c.evalStatus} flowStatus={c.status} scheduleMeetingLink={c.scheduleMeetingLink} scheduleEnded={scheduleEnded} />
               </div>
-              {role >= 3 && (
-                <div className="text-sm">
-                  手机: {c.phoneNumber || "-"}
-                </div>
-              )}
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <span>作品</span>
+              <div className="flex flex-wrap items-center gap-2">
                 <PortfolioLink value={c.portfolioLink} />
               </div>
-              <div className="flex items-start gap-2 text-xs text-muted-foreground">
-                <span className="pt-0.5">会议</span>
-                <ScheduleInfo candidate={c} />
-              </div>
+              <ScheduleInfo candidate={c} />
               {role >= 2 && (
                 !canEvaluate ? (
-                  <div className="flex flex-wrap items-center gap-2 pt-1">
-                    <ActionTextButton onClick={() => startSchedule(c)}>
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    <ActionButton onClick={() => startSchedule(c)}>
                       {c.scheduleMeetingLink ? "改约" : "预约"}
-                    </ActionTextButton>
+                    </ActionButton>
                     {c.scheduleMeetingLink && (
-                      <ActionTextButton
+                      <ActionButton
                         disabled={busy}
                         onClick={() => handleCancelSchedule(c)}
                       >
                         {busy ? "处理中" : "取消"}
-                      </ActionTextButton>
+                      </ActionButton>
+                    )}
+                    {canConfirmScheduleEnded && (
+                      <ActionButton
+                        disabled={busy}
+                        onClick={() => handleConfirmScheduleEnded(c)}
+                      >
+                        {busy ? "处理中" : "确认结束"}
+                      </ActionButton>
                     )}
                   </div>
                 ) : isEditing ? (
@@ -655,35 +771,23 @@ export const EvaluationTable = ({
                     正在编辑面评
                   </div>
                 ) : c.evalStatus === "submitted" ? (
-                  <div className="flex items-center gap-2 pt-1">
-                    <ActionTextButton onClick={() => startEdit(c, "pass")}>
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    <ActionButton onClick={() => startEdit(c)}>
                       修改
-                    </ActionTextButton>
+                    </ActionButton>
                   </div>
-                ) : c.evalStatus === "approved" ? (
-                  <div className="pt-1 text-sm text-muted-foreground">已完成</div>
-                ) : c.evalStatus === "rejected" ? (
-                  <div className="pt-1 text-sm text-muted-foreground">已驳回</div>
+                ) : c.evalStatus === "approved" || c.evalStatus === "rejected" ? (
+                  <div className="pt-1 text-sm text-muted-foreground">已归档</div>
                 ) : isRejected ? (
-                  <div className="pt-1">
-                    <ActionTextButton onClick={() => startEdit(c, "reopen")}>
-                      改为通过
-                    </ActionTextButton>
-                  </div>
+                  <div className="pt-1 text-sm text-muted-foreground">已结束</div>
                 ) : (
-                  <div className="flex w-fit gap-3">
-                    <ActionTextButton onClick={() => startSchedule(c)}>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <ActionButton onClick={() => startSchedule(c)}>
                       改约
-                    </ActionTextButton>
-                    <ActionTextButton onClick={() => startEdit(c, "pass")}>
-                      通过
-                    </ActionTextButton>
-                    <ActionTextButton
-                      disabled={busy}
-                      onClick={() => handleReject(c.userFlowId)}
-                    >
-                      {busy ? "处理中" : "不通过"}
-                    </ActionTextButton>
+                    </ActionButton>
+                    <ActionButton tone="primary" onClick={() => startEdit(c)}>
+                      填写面评
+                    </ActionButton>
                   </div>
                 )
               )}
@@ -714,52 +818,78 @@ export const EvaluationTable = ({
               </div>
             )}
             <div className="space-y-2">
-              <label className="text-sm font-medium">面评内容</label>
+              <label htmlFor="evaluation-content" className="text-sm font-medium">
+                面评内容 <span className="text-destructive">*</span>
+              </label>
+              <p className="text-xs leading-5 text-muted-foreground">
+                面评内容必填，讲师建议不能替代面评正文。
+              </p>
               <Textarea
+                id="evaluation-content"
                 placeholder="请输入面评内容..."
                 value={content}
-                onChange={(e) => setContent(e.target.value)}
+                onChange={(e) => {
+                  setContent(e.target.value);
+                  if (evaluationError) setEvaluationError(null);
+                }}
+                aria-invalid={Boolean(evaluationError)}
+                aria-describedby={
+                  evaluationError ? "evaluation-content-error" : undefined
+                }
+                required
                 className="min-h-[160px] resize-y"
               />
+              {evaluationError && (
+                <p id="evaluation-content-error" role="alert" className="text-sm text-destructive">
+                  {evaluationError}
+                </p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">讲师建议</label>
+              <div className="grid grid-cols-2 gap-2" role="group" aria-label="讲师建议">
+                <Button
+                  type="button"
+                  variant={recommendation === "passed" ? "default" : "outline"}
+                  aria-pressed={recommendation === "passed"}
+                  onClick={() => setRecommendation("passed")}
+                >
+                  建议通过
+                </Button>
+                <Button
+                  type="button"
+                  variant={recommendation === "failed" ? "destructive" : "outline"}
+                  aria-pressed={recommendation === "failed"}
+                  onClick={() => setRecommendation("failed")}
+                >
+                  建议不通过
+                </Button>
+              </div>
+              <p className="text-xs leading-5 text-muted-foreground">
+                此为讲师意见，最终结果由管理员结合面评审核决定。
+              </p>
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">妙记链接</label>
-              <div className="flex gap-2">
-                <Input
-                  placeholder="https://..."
-                  value={meetingLink}
-                  onChange={(e) => setMeetingLink(e.target.value)}
-                  className="h-10"
-                />
-                {editingCandidate?.scheduleId && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => handleGenerateMeetingMinute(editingCandidate)}
-                    loading={minuteLoading}
-                    disabled={
-                      minuteLoading ||
-                      (getTime(editingCandidate.scheduleEndsAt) ?? Number.POSITIVE_INFINITY) > Date.now()
-                    }
-                  >
-                    生成妙记
-                  </Button>
-                )}
-              </div>
+              {meetingLink ? (
+                <a
+                  href={externalHref(meetingLink)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex max-w-full items-center gap-1.5 text-sm text-foreground hover:text-primary hover:underline"
+                >
+                  <span className="truncate">查看妙记</span>
+                  <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                </a>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  飞书生成妙记后会自动同步到这里。
+                </p>
+              )}
             </div>
           </div>
           <DialogFooter className="mt-2 border-t pt-4 sm:items-center sm:justify-between">
             <div className="min-h-9">
-              {editingCandidate && editingCandidate.status !== "failed" && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => handleReject(editingCandidate.userFlowId)}
-                  loading={loadingId === editingCandidate.userFlowId}
-                >
-                  不通过
-                </Button>
-              )}
             </div>
             <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <Button type="button" variant="outline" onClick={cancelEdit}>
@@ -769,9 +899,7 @@ export const EvaluationTable = ({
                 type="button"
                 onClick={() => {
                   if (!editingCandidate) return;
-                  return editMode === "reopen"
-                    ? handleReopen(editingCandidate.userFlowId)
-                    : handlePass(editingCandidate.userFlowId);
+                  return handlePass(editingCandidate.userFlowId);
                 }}
                 loading={
                   editingCandidate
@@ -793,45 +921,40 @@ export const EvaluationTable = ({
       >
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>预约面试会议</DialogTitle>
+            <DialogTitle>安排线下面试</DialogTitle>
             <DialogDescription>
               {schedulingCandidate
                 ? `${schedulingCandidate.name}（${schedulingCandidate.studentId ?? "无学号"}）`
-                : "创建飞书会议和日程，并发送预约邮件。"}
+                : "创建内部飞书日程和留档会议，并发送线下面试预约邮件。"}
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-4 py-2">
+            <FeishuOAuthStatus
+              role={role}
+              onStatusChange={(status, meta) => {
+                setFeishuBound(status?.bound ?? null);
+                setFeishuStatusFailed(meta.failed);
+              }}
+            />
+            {feishuBound === false && (
+              <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-900 dark:text-amber-100">
+                发起飞书会议和日程前需要先绑定飞书授权。点击上方「绑定飞书」完成授权后，再填写时间并发起日程。
+              </p>
+            )}
+            <p className="text-xs leading-5 text-muted-foreground">
+              飞书会议仅用于录制与妙记留档；候选人邮件只包含线下面试时间、地点和备注。
+            </p>
+            {feishuStatusFailed && (
+              <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
+                飞书授权状态检查失败。可尝试重新绑定，或刷新页面后再试。
+              </p>
+            )}
             {schedulingCandidate?.scheduleMeetingLink && (
               <div className="rounded-lg border bg-muted/30 p-3">
-                <p className="mb-1 text-xs text-muted-foreground">当前会议</p>
+                <p className="mb-1 text-xs text-muted-foreground">当前留档会议</p>
                 <ScheduleInfo candidate={schedulingCandidate} />
               </div>
             )}
-            <div className="flex items-start justify-between gap-3 rounded-lg border bg-muted/20 p-3">
-              <div>
-                <p className="text-sm font-medium">飞书授权</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {feishuStatus === null
-                    ? "正在检查当前讲师的飞书绑定状态。"
-                    : feishuStatus.bound
-                      ? "已绑定飞书，日程会以当前讲师的飞书身份发起。"
-                      : "未绑定飞书，发起日程前需要先完成授权。"}
-                </p>
-                {feishuStatus?.accessTokenExpiresAt && (
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    授权有效期至 {formatScheduleTime(feishuStatus.accessTokenExpiresAt)}
-                  </p>
-                )}
-              </div>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => redirectFeishuOAuth()}
-              >
-                {feishuStatus?.bound ? "重新绑定" : "绑定飞书"}
-              </Button>
-            </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-2">
                 <label className="text-sm font-medium">开始时间</label>
@@ -851,6 +974,15 @@ export const EvaluationTable = ({
                   className="h-10"
                 />
               </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">地点</label>
+              <Input
+                placeholder="例如：仙林校区大学生活动中心 101"
+                value={scheduleLocation}
+                onChange={(e) => setScheduleLocation(e.target.value)}
+                className="h-10"
+              />
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">预约备注</label>
@@ -880,13 +1012,60 @@ export const EvaluationTable = ({
             </Button>
             <Button
               type="button"
+              variant="outline"
+              onClick={() => {
+                if (!schedulingCandidate) return;
+                return handlePreviewScheduleEmail(schedulingCandidate.userFlowId);
+              }}
+              loading={emailPreviewLoading}
+            >
+              预览邮件
+            </Button>
+            <Button
+              type="button"
               onClick={() => {
                 if (!schedulingCandidate) return;
                 return handleCreateSchedule(schedulingCandidate.userFlowId);
               }}
               loading={scheduleLoading}
+              disabled={feishuBound !== true}
+              title={
+                feishuBound === true
+                  ? undefined
+                  : "请先绑定飞书账号后再发起面试日程"
+              }
             >
-              {schedulingCandidate?.scheduleMeetingLink ? "保存改约" : "发起飞书日程"}
+              {schedulingCandidate?.scheduleMeetingLink ? "保存改约" : "创建线下面试日程"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={Boolean(emailPreview)}
+        onOpenChange={(open) => {
+          if (!open) setEmailPreview(null);
+        }}
+      >
+        <DialogContent className="flex max-h-[85dvh] w-[calc(100vw-2rem)] max-w-3xl flex-col gap-4 overflow-hidden sm:max-w-3xl">
+          <DialogHeader className="shrink-0">
+            <DialogTitle>预约邮件预览</DialogTitle>
+            <DialogDescription className="line-clamp-2">
+              {emailPreview
+                ? `收件人：${emailPreview.to}；主题：${emailPreview.subject}`
+                : "预览将使用当前填写的时间和备注。"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-hidden rounded-lg border bg-muted/20">
+            <iframe
+              title="预约邮件预览"
+              srcDoc={emailPreview?.html ?? ""}
+              sandbox=""
+              className="h-[min(55dvh,520px)] w-full bg-white"
+            />
+          </div>
+          <DialogFooter className="shrink-0">
+            <Button type="button" variant="outline" onClick={() => setEmailPreview(null)}>
+              关闭
             </Button>
           </DialogFooter>
         </DialogContent>
